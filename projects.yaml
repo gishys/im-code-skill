@@ -1,0 +1,28 @@
+projects:
+  - name: demo-app
+    default_branch: main
+    frontend:
+      repo: git@github.com:example/demo-frontend.git
+      install: npm ci
+      test: npm test
+      build: npm run build
+      artifact_paths:
+        - dist
+    backend:
+      repo: git@github.com:example/demo-backend.git
+      install: npm ci
+      test: npm test
+      build: npm run build
+      artifact_paths:
+        - dist
+    package:
+      format: zip
+      name_template: "{project}-{scope}-{taskId}-{timestamp}.zip"
+    auto_approve_rules:
+      users:
+        - ou_example
+      task_types:
+        - bug
+      scopes:
+        - frontend
+        - backend
