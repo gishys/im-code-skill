@@ -6,7 +6,7 @@ import { findProject } from "../config/projects.js";
 import type { FeishuClient } from "../feishu/client.js";
 import { buildTaskCard } from "../feishu/cards.js";
 import { packageArtifacts } from "../artifact/packager.js";
-import { runCodex } from "../codex/runner.js";
+import { runCodex, runCodexPlan } from "../codex/runner.js";
 import { buildTaskBranch, cloneRepo, commitAll, createBranch, pushBranch } from "../github/git.js";
 import { createPullRequest, parseGitHubRepoName } from "../github/pull-request.js";
 import { runProjectChecks } from "../testing/runner.js";
@@ -28,6 +28,46 @@ export class TaskRunner {
   ) {}
 
   async run(task: TaskRecord): Promise<void> {
+    if (task.executionMode === "plan") {
+      await this.runPlanTask(task);
+      return;
+    }
+    await this.runAgentTask(task);
+  }
+
+  private async runPlanTask(task: TaskRecord): Promise<void> {
+    const project = findProject(this.projects, task.projectName);
+    const workspace = join(this.env.WORKSPACE_ROOT, task.id);
+    const repoWorks = this.resolveRepos(task, project, workspace);
+
+    try {
+      await mkdir(workspace, { recursive: true });
+      await mkdir(join(workspace, "logs"), { recursive: true });
+      await this.progress(task, `Workspace ready: ${workspace}`);
+
+      this.tasks.updateStage(task.id, "cloning", "Cloning repositories for planning");
+      for (const repo of repoWorks) {
+        await cloneRepo(repo.config.repo, project.default_branch, repo.dir);
+      }
+
+      this.tasks.updateStage(task.id, "planning", "Generating implementation plan");
+      await this.progress(this.tasks.getTask(task.id), "Codex is generating a plan");
+      const result = await runCodexPlan(this.env, this.tasks.getTask(task.id), repoWorks.map((item) => item.dir), workspace);
+      await assertReposClean(repoWorks);
+
+      this.tasks.markPlanReady(task.id, {
+        planSummary: result.summary,
+        planArtifactPath: result.planPath
+      });
+      await this.progress(this.tasks.getTask(task.id), "Plan is ready");
+    } catch (error) {
+      const summary = error instanceof Error ? error.message : String(error);
+      this.tasks.markFailed(task.id, this.tasks.getTask(task.id).currentStage, summary);
+      await this.progress(this.tasks.getTask(task.id), summary);
+    }
+  }
+
+  private async runAgentTask(task: TaskRecord): Promise<void> {
     const project = findProject(this.projects, task.projectName);
     const workspace = join(this.env.WORKSPACE_ROOT, task.id);
     const branch = buildTaskBranch(task.id);
@@ -153,11 +193,24 @@ async function runConfiguredCommand(cwd: string, command?: string): Promise<void
   }
 }
 
+async function assertReposClean(repoWorks: RepoWork[]): Promise<void> {
+  for (const repo of repoWorks) {
+    const result = await execa("git", ["status", "--porcelain"], { cwd: repo.dir, all: true, reject: false });
+    if (result.exitCode !== 0) {
+      throw new Error(`Failed to inspect ${repo.kind} repository after planning:\n${result.all ?? ""}`);
+    }
+    if ((result.stdout ?? "").trim()) {
+      throw new Error(`Plan mode modified files in ${repo.kind}; refusing to continue.\n${result.stdout}`);
+    }
+  }
+}
+
 function buildPrBody(task: TaskRecord, repoKind: string, artifactName: string): string {
   return [
     `Feishu task: ${task.id}`,
     `Project: ${task.projectName}`,
     `Repository: ${repoKind}`,
+    `Mode: ${task.executionMode}`,
     `Type: ${task.taskType}`,
     `Scope: ${task.scope}`,
     "",

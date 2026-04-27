@@ -12,6 +12,7 @@ describe("parseTaskMessage", () => {
       projectName: "demo-app",
       taskType: "bug",
       scope: "frontend",
+      executionMode: "agent",
       description: "修复登录按钮无响应"
     });
   });
@@ -24,6 +25,7 @@ description: add export flow`);
 
     expect(result.taskType).toBe("feature");
     expect(result.scope).toBe("fullstack");
+    expect(result.executionMode).toBe("agent");
   });
 
   it("reports missing required fields in Chinese", () => {

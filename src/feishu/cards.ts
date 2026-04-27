@@ -1,18 +1,24 @@
-import type { ProjectConfig, TaskRecord } from "../types.js";
+import type { PendingInputAsset, ProjectConfig, TaskRecord } from "../types.js";
 
 const taskTypeLabel: Record<string, string> = {
   bug: "Bug 修复",
-  feature: "新增需求"
+  feature: "功能需求"
+};
+
+const executionModeLabel: Record<string, string> = {
+  plan: "先出方案",
+  agent: "直接执行"
 };
 
 const scopeLabel: Record<string, string> = {
   frontend: "前端",
   backend: "后端",
-  fullstack: "前后端"
+  fullstack: "全栈"
 };
 
 const statusLabel: Record<string, string> = {
   created: "已创建",
+  plan_ready: "方案已就绪",
   waiting_approval: "等待确认",
   queued: "排队中",
   running: "执行中",
@@ -26,36 +32,41 @@ const stageLabel: Record<string, string> = {
   received: "已接收",
   approval: "等待确认",
   queued: "排队中",
-  cloning: "拉取仓库",
-  codex_running: "Codex 修改代码",
-  testing: "运行测试",
-  building: "构建项目",
-  packaging: "打包产物",
+  planning: "生成方案",
+  cloning: "准备代码",
+  codex_running: "Codex 执行中",
+  testing: "测试中",
+  building: "构建中",
+  packaging: "打包中",
   creating_pr: "创建 PR",
-  uploading: "上传飞书文件",
+  uploading: "上传产物",
   done: "完成",
   failed: "失败"
 };
 
 export function buildTaskCard(task: TaskRecord, extra?: { logExcerpt?: string }): object {
+  const inputAssetCount = countInputAssets(task.inputAssetsJson);
   const lines = [
     `**任务 ID**：${task.id}`,
     `**项目**：${task.projectName}`,
+    `**模式**：${executionModeLabel[task.executionMode] ?? task.executionMode}`,
     `**类型**：${taskTypeLabel[task.taskType] ?? task.taskType}`,
     `**范围**：${scopeLabel[task.scope] ?? task.scope}`,
     `**状态**：${statusLabel[task.status] ?? task.status}`,
     `**阶段**：${stageLabel[task.currentStage] ?? task.currentStage}`,
+    inputAssetCount > 0 ? `**关联附件**：${inputAssetCount} 个` : undefined,
+    task.planSummary ? `**方案摘要**：\n${task.planSummary}` : undefined,
     task.githubPrUrl ? `**PR**：${task.githubPrUrl}` : undefined,
-    task.artifactFileKey ? `**部署包**：已上传到飞书` : undefined,
+    task.artifactFileKey ? "**部署包**：已上传到飞书" : undefined,
     task.failureSummary ? `**失败原因**：${task.failureSummary}` : undefined,
-    extra?.logExcerpt ? `**最近日志**：\n${extra.logExcerpt}` : undefined
+    extra?.logExcerpt ? `**日志摘要**：\n${extra.logExcerpt}` : undefined
   ].filter(Boolean);
 
   return {
     config: { wide_screen_mode: true },
     header: {
       title: { tag: "plain_text", content: `Codex 任务：${statusLabel[task.status] ?? task.status}` },
-      template: task.status === "failed" ? "red" : task.status === "succeeded" ? "green" : "blue"
+      template: task.status === "failed" ? "red" : task.status === "succeeded" || task.status === "plan_ready" ? "green" : "blue"
     },
     elements: [
       {
@@ -64,30 +75,7 @@ export function buildTaskCard(task: TaskRecord, extra?: { logExcerpt?: string })
       },
       {
         tag: "action",
-        actions: [
-          {
-            tag: "button",
-            text: { tag: "plain_text", content: "确认执行" },
-            type: "primary",
-            value: { action: "approve", taskId: task.id }
-          },
-          {
-            tag: "button",
-            text: { tag: "plain_text", content: "取消任务" },
-            type: "danger",
-            value: { action: "cancel", taskId: task.id }
-          },
-          {
-            tag: "button",
-            text: { tag: "plain_text", content: "查看状态" },
-            value: { action: "status", taskId: task.id }
-          },
-          {
-            tag: "button",
-            text: { tag: "plain_text", content: "重新执行" },
-            value: { action: "retry", taskId: task.id }
-          }
-        ]
+        actions: taskActions(task)
       }
     ]
   };
@@ -98,7 +86,7 @@ export function buildHelpCard(input?: { reason?: string }): object {
   return {
     config: { wide_screen_mode: true },
     header: {
-      title: { tag: "plain_text", content: "Codex 任务助手" },
+      title: { tag: "plain_text", content: "Codex 任务帮助" },
       template: "blue"
     },
     elements: [
@@ -108,18 +96,15 @@ export function buildHelpCard(input?: { reason?: string }): object {
           tag: "lark_md",
           content:
             `${reason}` +
-            "**请按下面格式发送任务：**\n" +
+            "发送“表单”可打开任务表单。表单里可选择“先出方案”或“直接执行”。\n\n" +
+            "也可以发送结构化文本：\n" +
             "```text\n" +
             "项目：demo-app\n" +
+            "模式：agent\n" +
             "类型：bug\n" +
             "范围：前端\n" +
-            "描述：修复登录页按钮点击无响应，并参考附件截图。\n" +
-            "```\n" +
-            "**字段说明**\n" +
-            "- 项目：必须匹配系统配置里的项目名，例如 `demo-app`\n" +
-            "- 类型：`bug` 或 `需求`\n" +
-            "- 范围：`前端`、`后端` 或 `前后端`\n" +
-            "- 描述：要改什么、如何复现、期望结果、验收标准"
+            "描述：请说明要改什么、如何复现、期望结果\n" +
+            "```"
         }
       },
       {
@@ -132,30 +117,24 @@ export function buildHelpCard(input?: { reason?: string }): object {
             value: { action: "open_task_form" }
           }
         ]
-      },
-      {
-        tag: "hr"
-      },
-      {
-        tag: "div",
-        text: {
-          tag: "lark_md",
-          content:
-            "**附件支持**\n" +
-            "- 图片：页面截图、报错截图、设计稿、UI 对比图\n" +
-            "- 视频：操作录屏、交互问题、动画或复现路径\n" +
-            "- 文件：需求文档、接口说明、日志文件\n\n" +
-            "发送附件时，请在 `描述` 中说明附件用途，例如：`第一张图是当前效果，第二张图是期望效果`。"
-        }
       }
     ]
   };
 }
 
-export function buildTaskFormCard(projects: ProjectConfig[], input?: { reason?: string; values?: Record<string, string> }): object {
+export function buildTaskFormCard(
+  projects: ProjectConfig[],
+  input?: { reason?: string; values?: Record<string, string>; draftId?: string; assetCandidates?: PendingInputAsset[] }
+): object {
   const projectOptions = projects.map((project) => ({
     text: { tag: "plain_text", content: project.name },
     value: project.name
+  }));
+  const selectedAssetIds = parseSelectedAssetIds(input?.values?.selectedAssetIds);
+  const assetCandidates = input?.assetCandidates ?? [];
+  const assetOptions = assetCandidates.map((asset) => ({
+    text: { tag: "plain_text", content: formatAssetOption(asset) },
+    value: asset.id
   }));
 
   return {
@@ -177,101 +156,144 @@ export function buildTaskFormCard(projects: ProjectConfig[], input?: { reason?: 
         tag: "div",
         text: {
           tag: "lark_md",
-          content: "请填写任务信息后提交。图片、视频、文件请直接发送到当前会话，并在“附件说明”中写清用途。"
+          content:
+            "请填写任务信息后提交。\n\n" +
+            "**附件处理方式**：图片、视频、文件请先直接发送到当前会话；然后点击“刷新附件列表”，在表单里选择要关联的附件。"
+        }
+      },
+      {
+        tag: "div",
+        text: {
+          tag: "lark_md",
+          content:
+            assetCandidates.length > 0
+              ? `已检测到 **${assetCandidates.length}** 个可关联附件，请在表单中选择。`
+              : "未检测到可关联附件。"
         }
       },
       {
         tag: "hr"
       },
       {
-        tag: "div",
-        text: { tag: "lark_md", content: "**项目**" }
-      },
-      {
-        tag: "select_static",
-        name: "projectName",
-        placeholder: { tag: "plain_text", content: "请选择项目" },
-        initial_option: projectOptions.find((option) => option.value === input?.values?.projectName),
-        options: projectOptions
-      },
-      {
-        tag: "div",
-        text: { tag: "lark_md", content: "**类型**" }
-      },
-      {
-        tag: "select_static",
-        name: "taskType",
-        placeholder: { tag: "plain_text", content: "请选择任务类型" },
-        initial_option: optionOf(
-          [
-            ["bug", "Bug 修复"],
-            ["feature", "新增需求"]
-          ],
-          input?.values?.taskType
-        ),
-        options: [
-          { text: { tag: "plain_text", content: "Bug 修复" }, value: "bug" },
-          { text: { tag: "plain_text", content: "新增需求" }, value: "feature" }
+        tag: "form",
+        name: "task_form",
+        elements: [
+          {
+            tag: "select_static",
+            name: "projectName",
+            required: true,
+            placeholder: { tag: "plain_text", content: "请选择项目" },
+            initial_index: initialIndex(projectOptions, input?.values?.projectName),
+            options: projectOptions
+          },
+          {
+            tag: "select_static",
+            name: "executionMode",
+            required: true,
+            placeholder: { tag: "plain_text", content: "请选择执行模式" },
+            initial_index: optionOf(
+              [
+                ["plan", "先出方案"],
+                ["agent", "直接执行"]
+              ],
+              input?.values?.executionMode
+            ),
+            options: [
+              { text: { tag: "plain_text", content: "先出方案" }, value: "plan" },
+              { text: { tag: "plain_text", content: "直接执行" }, value: "agent" }
+            ]
+          },
+          {
+            tag: "select_static",
+            name: "taskType",
+            required: true,
+            placeholder: { tag: "plain_text", content: "请选择任务类型" },
+            initial_index: optionOf(
+              [
+                ["bug", "Bug 修复"],
+                ["feature", "功能需求"]
+              ],
+              input?.values?.taskType
+            ),
+            options: [
+              { text: { tag: "plain_text", content: "Bug 修复" }, value: "bug" },
+              { text: { tag: "plain_text", content: "功能需求" }, value: "feature" }
+            ]
+          },
+          {
+            tag: "select_static",
+            name: "scope",
+            required: true,
+            placeholder: { tag: "plain_text", content: "请选择修改范围" },
+            initial_index: optionOf(
+              [
+                ["frontend", "前端"],
+                ["backend", "后端"],
+                ["fullstack", "全栈"]
+              ],
+              input?.values?.scope
+            ),
+            options: [
+              { text: { tag: "plain_text", content: "前端" }, value: "frontend" },
+              { text: { tag: "plain_text", content: "后端" }, value: "backend" },
+              { text: { tag: "plain_text", content: "全栈" }, value: "fullstack" }
+            ]
+          },
+          {
+            tag: "input",
+            name: "description",
+            required: true,
+            multiline: true,
+            label: { tag: "plain_text", content: "描述" },
+            placeholder: {
+              tag: "plain_text",
+              content: "请写清：要改什么、如何复现、期望结果、验收标准"
+            },
+            default_value: input?.values?.description ?? ""
+          },
+          {
+            tag: "multi_select_static",
+            name: "selectedAssetIds",
+            placeholder: { tag: "plain_text", content: "请选择要关联到本任务的附件" },
+            selected_values: selectedAssetIds.filter((id) => assetOptions.some((option) => option.value === id)),
+            options:
+              assetOptions.length > 0
+                ? assetOptions
+                : [
+                    {
+                      text: { tag: "plain_text", content: "暂无可关联附件，请先发送附件后刷新" },
+                      value: "__no_pending_assets__"
+                    }
+                  ]
+          },
+          {
+            tag: "input",
+            name: "attachmentNote",
+            multiline: true,
+            label: { tag: "plain_text", content: "附件清单与说明（可选）" },
+            placeholder: {
+              tag: "plain_text",
+              content: "例如：图 1 是当前效果，图 2 是期望效果"
+            },
+            default_value: input?.values?.attachmentNote ?? ""
+          },
+          {
+            tag: "button",
+            name: "submit",
+            action_type: "form_submit",
+            text: { tag: "plain_text", content: "提交任务" },
+            type: "primary",
+            value: { action: "submit_task_form", draftId: input?.draftId }
+          }
         ]
-      },
-      {
-        tag: "div",
-        text: { tag: "lark_md", content: "**范围**" }
-      },
-      {
-        tag: "select_static",
-        name: "scope",
-        placeholder: { tag: "plain_text", content: "请选择修改范围" },
-        initial_option: optionOf(
-          [
-            ["frontend", "前端"],
-            ["backend", "后端"],
-            ["fullstack", "前后端"]
-          ],
-          input?.values?.scope
-        ),
-        options: [
-          { text: { tag: "plain_text", content: "前端" }, value: "frontend" },
-          { text: { tag: "plain_text", content: "后端" }, value: "backend" },
-          { text: { tag: "plain_text", content: "前后端" }, value: "fullstack" }
-        ]
-      },
-      {
-        tag: "div",
-        text: { tag: "lark_md", content: "**描述**" }
-      },
-      {
-        tag: "input",
-        name: "description",
-        multiline: true,
-        placeholder: {
-          tag: "plain_text",
-          content: "请写清：要改什么、如何复现、期望结果、验收标准"
-        },
-        default_value: input?.values?.description ?? ""
-      },
-      {
-        tag: "div",
-        text: { tag: "lark_md", content: "**附件说明（可选）**" }
-      },
-      {
-        tag: "input",
-        name: "attachmentNote",
-        multiline: true,
-        placeholder: {
-          tag: "plain_text",
-          content: "例如：第一张图是当前效果，视频是复现路径，日志文件是后端错误日志"
-        },
-        default_value: input?.values?.attachmentNote ?? ""
       },
       {
         tag: "action",
         actions: [
           {
             tag: "button",
-            text: { tag: "plain_text", content: "提交任务" },
-            type: "primary",
-            value: { action: "submit_task_form" }
+            text: { tag: "plain_text", content: "刷新附件列表" },
+            value: { action: "refresh_task_form_assets", draftId: input?.draftId }
           },
           {
             tag: "button",
@@ -284,7 +306,90 @@ export function buildTaskFormCard(projects: ProjectConfig[], input?: { reason?: 
   };
 }
 
-function optionOf(options: Array<[string, string]>, value?: string) {
-  const option = options.find(([candidate]) => candidate === value);
-  return option ? { text: { tag: "plain_text", content: option[1] }, value: option[0] } : undefined;
+function taskActions(task: TaskRecord): object[] {
+  if (task.executionMode === "plan" && task.status === "plan_ready") {
+    return [
+      {
+        tag: "button",
+        text: { tag: "plain_text", content: "转为 Agent 执行" },
+        type: "primary",
+        value: { action: "approve_plan_as_agent", taskId: task.id }
+      },
+      {
+        tag: "button",
+        text: { tag: "plain_text", content: "取消任务" },
+        type: "danger",
+        value: { action: "cancel", taskId: task.id }
+      },
+      {
+        tag: "button",
+        text: { tag: "plain_text", content: "查看状态" },
+        value: { action: "status", taskId: task.id }
+      }
+    ];
+  }
+
+  return [
+    {
+      tag: "button",
+      text: { tag: "plain_text", content: "确认执行" },
+      type: "primary",
+      value: { action: "approve", taskId: task.id }
+    },
+    {
+      tag: "button",
+      text: { tag: "plain_text", content: "取消任务" },
+      type: "danger",
+      value: { action: "cancel", taskId: task.id }
+    },
+    {
+      tag: "button",
+      text: { tag: "plain_text", content: "查看状态" },
+      value: { action: "status", taskId: task.id }
+    },
+    {
+      tag: "button",
+      text: { tag: "plain_text", content: "重新执行" },
+      value: { action: "retry", taskId: task.id }
+    }
+  ];
+}
+
+function initialIndex(options: Array<{ value: string }>, value?: string): number | undefined {
+  const index = options.findIndex((option) => option.value === value);
+  return index >= 0 ? index : undefined;
+}
+
+function optionOf(options: Array<[string, string]>, value?: string): number | undefined {
+  const index = options.findIndex(([candidate]) => candidate === value);
+  return index >= 0 ? index : undefined;
+}
+
+function parseSelectedAssetIds(value?: string): string[] {
+  return value
+    ? value
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean)
+    : [];
+}
+
+function formatAssetOption(asset: PendingInputAsset): string {
+  const label = asset.label ?? "附件";
+  const date = new Date(asset.createdAt);
+  const time = Number.isNaN(date.getTime()) ? "" : `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  const name = asset.fileName.length > 28 ? `${asset.fileName.slice(0, 27)}…` : asset.fileName;
+  return `${label} ${time} ${name}`;
+}
+
+function countInputAssets(value?: string | null): number {
+  if (!value) {
+    return 0;
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed.length : 0;
+  } catch {
+    return 0;
+  }
 }

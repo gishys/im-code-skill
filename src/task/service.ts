@@ -16,6 +16,7 @@ function rowToTask(row: Record<string, unknown>): TaskRecord {
     projectName: String(row.project_name),
     taskType: row.task_type as TaskRecord["taskType"],
     scope: row.scope as TaskRecord["scope"],
+    executionMode: (row.execution_mode as TaskRecord["executionMode"] | null) ?? "agent",
     rawText: String(row.raw_text),
     parsedDescription: String(row.parsed_description),
     status: row.status as TaskStatus,
@@ -27,6 +28,8 @@ function rowToTask(row: Record<string, unknown>): TaskRecord {
     workspacePath: row.workspace_path as string | null,
     artifactPath: row.artifact_path as string | null,
     artifactFileKey: row.artifact_file_key as string | null,
+    planSummary: row.plan_summary as string | null,
+    planArtifactPath: row.plan_artifact_path as string | null,
     inputAssetsJson: row.input_assets_json as string | null,
     streamMessageId: row.stream_message_id as string | null,
     githubPrUrl: row.github_pr_url as string | null,
@@ -53,19 +56,30 @@ export class TaskService {
     feishuMessageId?: string;
     feishuUserId?: string;
     autoApproved: boolean;
+    deferQueue?: boolean;
   }): TaskRecord {
     const id = `task-${randomUUID()}`;
     const timestamp = now();
-    const status: TaskStatus = input.autoApproved ? "queued" : "waiting_approval";
-    const approvalStatus = input.autoApproved ? "auto_approved" : "pending";
+    const isPlan = input.parsed.executionMode === "plan";
+    const status: TaskStatus = isPlan
+      ? input.deferQueue
+        ? "created"
+        : "queued"
+      : input.autoApproved
+        ? input.deferQueue
+          ? "created"
+          : "queued"
+        : "waiting_approval";
+    const approvalStatus = isPlan ? "auto_approved" : input.autoApproved ? "auto_approved" : "pending";
+    const currentStage = isPlan ? (input.deferQueue ? "received" : "queued") : input.autoApproved ? (input.deferQueue ? "received" : "queued") : "approval";
 
     this.db
       .prepare(
         `INSERT INTO tasks (
           id, feishu_event_id, feishu_chat_id, feishu_message_id, feishu_user_id,
-          project_name, task_type, scope, raw_text, parsed_description, status,
+          project_name, task_type, scope, execution_mode, raw_text, parsed_description, status,
           approval_status, auto_approved, current_stage, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -76,17 +90,18 @@ export class TaskService {
         input.parsed.projectName,
         input.parsed.taskType,
         input.parsed.scope,
+        input.parsed.executionMode,
         input.rawText,
         input.parsed.description,
         status,
         approvalStatus,
-        input.autoApproved ? 1 : 0,
-        input.autoApproved ? "queued" : "approval",
+        isPlan || input.autoApproved ? 1 : 0,
+        currentStage,
         timestamp,
         timestamp
       );
 
-    this.addEvent(id, "task_created", input.autoApproved ? "queued" : "approval", "Task created");
+    this.addEvent(id, "task_created", currentStage, "Task created");
     return this.getTask(id);
   }
 
@@ -124,13 +139,30 @@ export class TaskService {
     return this.getTask(id);
   }
 
+  approvePlanAsAgent(id: string, feishuUserId?: string): TaskRecord {
+    const timestamp = now();
+    this.db
+      .prepare(
+        `UPDATE tasks
+         SET execution_mode = 'agent', status = 'queued', approval_status = 'approved',
+             current_stage = 'queued', updated_at = ?, finished_at = NULL
+         WHERE id = ? AND execution_mode = 'plan' AND status = 'plan_ready'`
+      )
+      .run(timestamp, id);
+    this.db
+      .prepare("INSERT INTO approvals (id, task_id, action, feishu_user_id, created_at) VALUES (?, ?, ?, ?, ?)")
+      .run(randomUUID(), id, "approved_plan_as_agent", feishuUserId ?? null, timestamp);
+    this.addEvent(id, "approved_plan_as_agent", "queued", "Plan approved for agent execution");
+    return this.getTask(id);
+  }
+
   cancelTask(id: string, feishuUserId?: string): TaskRecord {
     const timestamp = now();
     this.db
       .prepare(
         `UPDATE tasks
          SET status = 'canceled', approval_status = 'rejected', current_stage = 'failed', updated_at = ?, finished_at = ?
-         WHERE id = ? AND status IN ('waiting_approval', 'queued')`
+         WHERE id = ? AND status IN ('waiting_approval', 'queued', 'plan_ready')`
       )
       .run(timestamp, timestamp, id);
     this.db
@@ -166,6 +198,18 @@ export class TaskService {
     this.addEvent(id, "succeeded", "done", "Task succeeded");
   }
 
+  markPlanReady(id: string, update: { planSummary: string; planArtifactPath?: string }): void {
+    const timestamp = now();
+    this.db
+      .prepare(
+        `UPDATE tasks SET status = 'plan_ready', current_stage = 'done',
+         plan_summary = ?, plan_artifact_path = COALESCE(?, plan_artifact_path),
+         updated_at = ?, finished_at = ? WHERE id = ?`
+      )
+      .run(update.planSummary, update.planArtifactPath ?? null, timestamp, timestamp, id);
+    this.addEvent(id, "plan_ready", "done", "Plan is ready");
+  }
+
   markFailed(id: string, stage: string, summary: string): void {
     const timestamp = now();
     this.db
@@ -179,6 +223,22 @@ export class TaskService {
 
   setStreamMessageId(id: string, messageId: string): void {
     this.db.prepare("UPDATE tasks SET stream_message_id = ?, updated_at = ? WHERE id = ?").run(messageId, now(), id);
+  }
+
+  enqueueTask(id: string): TaskRecord {
+    const timestamp = now();
+    this.db
+      .prepare("UPDATE tasks SET status = 'queued', current_stage = 'queued', updated_at = ? WHERE id = ? AND status = 'created'")
+      .run(timestamp, id);
+    this.addEvent(id, "queued", "queued", "Task queued");
+    return this.getTask(id);
+  }
+
+  updateTaskInputText(id: string, input: { rawText: string; parsedDescription: string }): TaskRecord {
+    this.db
+      .prepare("UPDATE tasks SET raw_text = ?, parsed_description = ?, updated_at = ? WHERE id = ?")
+      .run(input.rawText, input.parsedDescription, now(), id);
+    return this.getTask(id);
   }
 
   addEvent(taskId: string, eventType: string, stage: string | null, message: string, metadata?: unknown): void {

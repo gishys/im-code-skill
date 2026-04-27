@@ -85,11 +85,17 @@ export class FeishuPoller {
 
     const event = polledMessageToEvent(message);
     if (!event.text.trim()) {
+      if (event.assets.length > 0) {
+        await this.ingestion.ingestPendingAssets(event);
+      }
       return;
     }
     try {
       await this.ingestion.ingestFeishuMessage(event);
     } catch (error) {
+      if (event.assets.length > 0) {
+        await this.ingestion.ingestPendingAssets(event);
+      }
       const summary = error instanceof Error ? error.message : String(error);
       await this.feishu.sendText(message.chatId, `任务解析失败：${summary}`);
     }
@@ -147,8 +153,8 @@ function polledMessageToEvent(message: FeishuPolledMessage): FeishuMessageEvent 
 function extractText(content: unknown): string {
   if (typeof content === "string") {
     try {
-      const parsed = JSON.parse(content) as { text?: string };
-      return parsed.text ?? "";
+      const parsed = JSON.parse(content) as Record<string, unknown>;
+      return typeof parsed.text === "string" ? parsed.text : "";
     } catch {
       return content;
     }

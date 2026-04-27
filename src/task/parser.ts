@@ -1,19 +1,25 @@
-import type { ParsedTaskMessage, TaskScope, TaskType } from "../types.js";
+import type { ParsedTaskMessage, TaskExecutionMode, TaskScope, TaskType } from "../types.js";
 
-const keyAliases: Record<string, keyof ParsedTaskMessage | "type" | "scope"> = {
-  项目: "projectName",
+const keyAliases: Record<string, keyof ParsedTaskMessage | "type" | "scope" | "mode"> = {
   project: "projectName",
-  项目名: "projectName",
-  类型: "type",
+  projectName: "projectName",
+  "项目": "projectName",
+  "项目名": "projectName",
   type: "type",
-  任务类型: "type",
-  范围: "scope",
+  "类型": "type",
+  "任务类型": "type",
   scope: "scope",
-  修改范围: "scope",
-  描述: "description",
+  "范围": "scope",
+  "修改范围": "scope",
+  mode: "mode",
+  executionMode: "mode",
+  execution_mode: "mode",
+  "模式": "mode",
+  "执行模式": "mode",
   description: "description",
-  需求描述: "description",
-  问题描述: "description"
+  "描述": "description",
+  "需求描述": "description",
+  "问题描述": "description"
 };
 
 function normalizeType(value: string): TaskType {
@@ -21,10 +27,10 @@ function normalizeType(value: string): TaskType {
   if (["bug", "缺陷", "问题", "修复"].includes(normalized)) {
     return "bug";
   }
-  if (["需求", "feature", "新增", "功能"].includes(normalized)) {
+  if (["feature", "需求", "功能", "新增"].includes(normalized)) {
     return "feature";
   }
-  throw new Error(`不支持的任务类型：${value}。请使用 bug 或 需求。`);
+  throw new Error(`不支持的任务类型：${value}。请使用 bug 或 feature。`);
 }
 
 function normalizeScope(value: string): TaskScope {
@@ -35,10 +41,21 @@ function normalizeScope(value: string): TaskScope {
   if (["后端", "backend", "be"].includes(normalized)) {
     return "backend";
   }
-  if (["前后端", "全栈", "fullstack", "both"].includes(normalized)) {
+  if (["全栈", "fullstack", "both"].includes(normalized)) {
     return "fullstack";
   }
-  throw new Error(`不支持的修改范围：${value}。请使用 前端、后端 或 前后端。`);
+  throw new Error(`不支持的修改范围：${value}。请使用 前端、后端 或 全栈。`);
+}
+
+function normalizeExecutionMode(value: string): TaskExecutionMode {
+  const normalized = value.trim().toLowerCase();
+  if (["plan", "planning", "方案", "先出方案", "只出方案"].includes(normalized)) {
+    return "plan";
+  }
+  if (["agent", "execute", "run", "执行", "直接执行"].includes(normalized)) {
+    return "agent";
+  }
+  throw new Error(`不支持的执行模式：${value}。请使用 plan 或 agent。`);
 }
 
 export function parseTaskMessage(text: string): ParsedTaskMessage {
@@ -68,6 +85,8 @@ export function parseTaskMessage(text: string): ParsedTaskMessage {
       fields.taskType = normalizeType(value);
     } else if (alias === "scope") {
       fields.scope = normalizeScope(value);
+    } else if (alias === "mode") {
+      fields.executionMode = normalizeExecutionMode(value);
     } else if (alias === "description") {
       fields.description = value;
     } else {
@@ -88,5 +107,5 @@ export function parseTaskMessage(text: string): ParsedTaskMessage {
     throw new Error(`缺少必填字段：${missing.join("、")}`);
   }
 
-  return fields as ParsedTaskMessage;
+  return { ...fields, executionMode: fields.executionMode ?? "agent" } as ParsedTaskMessage;
 }

@@ -65,30 +65,45 @@ export class FeishuClient {
 
   async downloadFile(fileKey: string, destination: string): Promise<string> {
     const token = await this.getTenantAccessToken();
-    await mkdir(dirname(destination), { recursive: true });
 
-    const response = await fetch(`https://open.feishu.cn/open-apis/im/v1/files/${fileKey}`, {
+    const response = await fetch(`https://open.feishu.cn/open-apis/im/v1/files/${encodeURIComponent(fileKey)}`, {
       headers: { Authorization: `Bearer ${token}` }
     });
-    if (!response.ok || !response.body) {
-      throw new Error(`Failed to download Feishu file ${fileKey}: ${response.status}`);
+    if (!response.ok) {
+      throw new Error(await this.formatFeishuDownloadError(response, `download Feishu file ${fileKey}`));
+    }
+    if (!response.body) {
+      throw new Error(`Feishu download Feishu file ${fileKey} failed: HTTP ${response.status}, empty response body`);
     }
 
-    const stream = createWriteStream(destination);
-    await response.body.pipeTo(
-      new WritableStream({
-        write(chunk) {
-          stream.write(chunk);
-        },
-        close() {
-          stream.close();
-        },
-        abort(reason) {
-          stream.destroy(reason);
-        }
-      })
-    );
+    await writeResponseBody(response, destination);
     return destination;
+  }
+
+  async downloadMessageResource(input: {
+    messageId: string;
+    fileKey: string;
+    resourceType: "image" | "file" | "video";
+    destination: string;
+  }): Promise<string> {
+    const token = await this.getTenantAccessToken();
+    const resourceType = input.resourceType === "image" ? "image" : "file";
+    const search = new URLSearchParams({ type: resourceType });
+    const response = await fetch(
+      `https://open.feishu.cn/open-apis/im/v1/messages/${encodeURIComponent(input.messageId)}/resources/${encodeURIComponent(input.fileKey)}?${search.toString()}`,
+      {
+        headers: { Authorization: `Bearer ${token}` }
+      }
+    );
+    if (!response.ok) {
+      throw new Error(await this.formatFeishuDownloadError(response, `download Feishu ${input.resourceType} ${input.fileKey}`));
+    }
+    if (!response.body) {
+      throw new Error(`Feishu download Feishu ${input.resourceType} ${input.fileKey} failed: HTTP ${response.status}, empty response body`);
+    }
+
+    await writeResponseBody(response, input.destination);
+    return input.destination;
   }
 
   async listChatMessages(input: {
@@ -193,6 +208,44 @@ export class FeishuClient {
     }
     return json;
   }
+
+  private async formatFeishuDownloadError(response: Response, action: string): Promise<string> {
+    const text = await response.text();
+    let json: Record<string, unknown> | undefined;
+    try {
+      json = text ? (JSON.parse(text) as Record<string, unknown>) : undefined;
+    } catch {
+      return `Feishu ${action} failed: HTTP ${response.status}, non-JSON response: ${text.slice(0, 500)}`;
+    }
+
+    if (Number(json?.code) === 99991672) {
+      return [
+        `Feishu ${action} failed: 飞书应用缺少消息资源读取权限 (app is missing message resource permission)`,
+        "请在飞书开放平台开通任一权限 [im:message.history:readonly, im:message:readonly, im:message] 后重新发布/授权",
+        `HTTP ${response.status}, code=${json?.code}, msg=${formatLogMessage(json?.msg ?? json?.message)}`
+      ].join("; ");
+    }
+
+    return `Feishu ${action} failed: HTTP ${response.status}, code=${json?.code}, msg=${formatLogMessage(json?.msg ?? json?.message)}`;
+  }
+}
+
+async function writeResponseBody(response: Response, destination: string): Promise<void> {
+  await mkdir(dirname(destination), { recursive: true });
+  const stream = createWriteStream(destination);
+  await response.body!.pipeTo(
+    new WritableStream({
+      write(chunk) {
+        stream.write(chunk);
+      },
+      close() {
+        stream.close();
+      },
+      abort(reason) {
+        stream.destroy(reason);
+      }
+    })
+  );
 }
 
 function formatLogMessage(value: unknown): string {

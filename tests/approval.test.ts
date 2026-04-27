@@ -29,6 +29,7 @@ describe("isAutoApproved", () => {
           projectName: "demo-app",
           taskType: "bug",
           scope: "frontend",
+          executionMode: "agent",
           description: "fix"
         },
         "ou_ok"
@@ -44,6 +45,7 @@ describe("isAutoApproved", () => {
           projectName: "demo-app",
           taskType: "feature",
           scope: "frontend",
+          executionMode: "agent",
           description: "add"
         },
         "ou_ok"
