@@ -76,7 +76,7 @@ export class FeishuClient {
       throw new Error(`Feishu download Feishu file ${fileKey} failed: HTTP ${response.status}, empty response body`);
     }
 
-    await writeResponseBody(response, destination);
+    await writeResponseBody(response, destination, this.env.MAX_ATTACHMENT_BYTES);
     return destination;
   }
 
@@ -102,7 +102,7 @@ export class FeishuClient {
       throw new Error(`Feishu download Feishu ${input.resourceType} ${input.fileKey} failed: HTTP ${response.status}, empty response body`);
     }
 
-    await writeResponseBody(response, input.destination);
+    await writeResponseBody(response, input.destination, this.env.MAX_ATTACHMENT_BYTES);
     return input.destination;
   }
 
@@ -236,12 +236,21 @@ export class FeishuClient {
   }
 }
 
-async function writeResponseBody(response: Response, destination: string): Promise<void> {
+async function writeResponseBody(response: Response, destination: string, maxBytes: number): Promise<void> {
+  const contentLength = Number(response.headers.get("content-length") ?? 0);
+  if (contentLength > maxBytes) {
+    throw new Error(`Downloaded file is too large: ${contentLength} bytes exceeds ${maxBytes} bytes`);
+  }
   await mkdir(dirname(destination), { recursive: true });
   const stream = createWriteStream(destination);
+  let downloaded = 0;
   await response.body!.pipeTo(
     new WritableStream({
       write(chunk) {
+        downloaded += chunk.byteLength;
+        if (downloaded > maxBytes) {
+          throw new Error(`Downloaded file is too large: exceeds ${maxBytes} bytes`);
+        }
         stream.write(chunk);
       },
       close() {

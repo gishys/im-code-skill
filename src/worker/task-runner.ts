@@ -1,5 +1,5 @@
 import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { execa } from "execa";
 import type { AppEnv } from "../config/env.js";
 import { findProject } from "../config/projects.js";
@@ -46,10 +46,12 @@ export class TaskRunner {
     try {
       await mkdir(workspace, { recursive: true });
       await mkdir(join(workspace, "logs"), { recursive: true });
+      this.assertNotCanceled(task.id);
       await this.progress(task, `Workspace ready: ${workspace}`);
 
       this.tasks.updateStage(task.id, "cloning", "Cloning repositories for planning");
       for (const repo of repoWorks) {
+        this.assertNotCanceled(task.id);
         await prepareCachedRepoWorktree({
           repo: repo.config.repo,
           branch: project.default_branch,
@@ -59,11 +61,14 @@ export class TaskRunner {
         });
       }
 
+      this.assertNotCanceled(task.id);
       this.tasks.updateStage(task.id, "planning", "Generating implementation plan");
       await this.progress(this.tasks.getTask(task.id), "Codex is generating a plan");
       const result = await runCodexPlan(this.env, this.tasks.getTask(task.id), repoWorks.map((item) => item.dir), workspace, {
+        shouldCancel: () => this.isTaskCanceled(task.id),
         onProgress: (update) => this.progress(this.tasks.getTask(task.id), update.chunk)
       });
+      this.assertNotCanceled(task.id);
       const currentTask = this.tasks.getTask(task.id);
       this.tasks.addCodexRun({
         id: result.runId,
@@ -100,6 +105,7 @@ export class TaskRunner {
         codexRunId: result.runId
       });
 
+      this.assertNotCanceled(task.id);
       this.tasks.markPlanReady(task.id, {
         planSummary: result.summary,
         planArtifactPath: result.planPath
@@ -114,6 +120,10 @@ export class TaskRunner {
       });
       await this.progress(this.tasks.getTask(task.id), result.summary || "Plan is ready", { force: true, replace: true });
     } catch (error) {
+      if (error instanceof TaskCanceledError || this.isTaskCanceled(task.id)) {
+        await this.progress(this.tasks.getTask(task.id), "Task canceled by user", { force: true, replace: true });
+        return;
+      }
       const summary = error instanceof Error ? error.message : String(error);
       this.tasks.markFailed(task.id, this.tasks.getTask(task.id).currentStage, summary);
       await this.progress(this.tasks.getTask(task.id), summary, { force: true });
@@ -129,10 +139,12 @@ export class TaskRunner {
     try {
       await mkdir(workspace, { recursive: true });
       await mkdir(join(workspace, "logs"), { recursive: true });
+      this.assertNotCanceled(task.id);
       await this.progress(task, `Workspace ready: ${workspace}`);
 
       this.tasks.updateStage(task.id, "cloning", "Cloning repositories");
       for (const repo of repoWorks) {
+        this.assertNotCanceled(task.id);
         await prepareCachedRepoWorktree({
           repo: repo.config.repo,
           branch: project.default_branch,
@@ -142,11 +154,14 @@ export class TaskRunner {
         });
       }
 
+      this.assertNotCanceled(task.id);
       this.tasks.updateStage(task.id, "codex_running", "Running Codex");
       await this.progress(this.tasks.getTask(task.id), "Codex is editing code");
       const codexResult = await runCodex(this.env, this.tasks.getTask(task.id), repoWorks.map((item) => item.dir), workspace, {
+        shouldCancel: () => this.isTaskCanceled(task.id),
         onProgress: (update) => this.progress(this.tasks.getTask(task.id), update.chunk)
       });
+      this.assertNotCanceled(task.id);
       const currentTask = this.tasks.getTask(task.id);
       this.tasks.addCodexRun({
         id: codexResult.runId,
@@ -177,7 +192,9 @@ export class TaskRunner {
 
       this.tasks.updateStage(task.id, "testing", "Running tests");
       for (const repo of repoWorks) {
-        await runConfiguredCommand(repo.dir, repo.config.install);
+        this.assertNotCanceled(task.id);
+        await runConfiguredCommand(repo.dir, repo.config.install, this.env);
+        this.assertNotCanceled(task.id);
         const test = await runProjectChecks(repo.dir, repo.config.test ? [repo.config.test] : [], workspace);
         if (!test.ok) {
           throw new Error(`Tests failed for ${repo.kind}:\n${test.summary}`);
@@ -186,17 +203,20 @@ export class TaskRunner {
 
       this.tasks.updateStage(task.id, "building", "Building projects");
       for (const repo of repoWorks) {
-        await runConfiguredCommand(repo.dir, repo.config.build);
+        this.assertNotCanceled(task.id);
+        await runConfiguredCommand(repo.dir, repo.config.build, this.env);
       }
 
+      this.assertNotCanceled(task.id);
       this.tasks.updateStage(task.id, "packaging", "Packaging artifacts");
-      const artifactPaths = repoWorks.flatMap((repo) => repo.config.artifact_paths.map((artifactPath) => join(repo.dir, artifactPath)));
+      const artifactPaths = repoWorks.flatMap((repo) => safeArtifactPaths(repo.dir, repo.config.artifact_paths));
       const artifact = await packageArtifacts(this.tasks.getTask(task.id), project, artifactPaths, workspace);
 
       this.tasks.updateStage(task.id, "creating_pr", "Creating GitHub pull request");
       const prUrls: string[] = [];
       let commitSha: string | undefined;
       for (const repo of repoWorks) {
+        this.assertNotCanceled(task.id);
         const sha = await commitAll(repo.dir, `codex: ${task.taskType} ${task.id}`);
         if (!sha) {
           continue;
@@ -241,12 +261,14 @@ export class TaskRunner {
         }
       }
 
+      this.assertNotCanceled(task.id);
       this.tasks.updateStage(task.id, "uploading", "Uploading artifact to Feishu");
       const fileKey = await this.feishu.uploadFile(artifact.path);
       if (task.feishuChatId && fileKey) {
         await this.feishu.sendFile(task.feishuChatId, fileKey);
       }
 
+      this.assertNotCanceled(task.id);
       this.tasks.markSucceeded(task.id, {
         artifactPath: artifact.path,
         artifactFileKey: fileKey,
@@ -256,6 +278,10 @@ export class TaskRunner {
       });
       await this.progress(this.tasks.getTask(task.id), codexResult.summary || "Task succeeded", { force: true, replace: true });
     } catch (error) {
+      if (error instanceof TaskCanceledError || this.isTaskCanceled(task.id)) {
+        await this.progress(this.tasks.getTask(task.id), "Task canceled by user", { force: true, replace: true });
+        return;
+      }
       const summary = error instanceof Error ? error.message : String(error);
       this.tasks.markFailed(task.id, this.tasks.getTask(task.id).currentStage, summary);
       await this.progress(this.tasks.getTask(task.id), summary, { force: true });
@@ -306,16 +332,100 @@ export class TaskRunner {
     this.progressTails.set(taskId, clipped);
     return clipped;
   }
+
+  private isTaskCanceled(taskId: string): boolean {
+    return this.tasks.getTask(taskId).status === "canceled";
+  }
+
+  private assertNotCanceled(taskId: string): void {
+    if (this.isTaskCanceled(taskId)) {
+      throw new TaskCanceledError(taskId);
+    }
+  }
 }
 
-async function runConfiguredCommand(cwd: string, command?: string): Promise<void> {
+class TaskCanceledError extends Error {
+  constructor(taskId: string) {
+    super(`Task canceled: ${taskId}`);
+  }
+}
+
+async function runConfiguredCommand(cwd: string, command: string | undefined, env: AppEnv): Promise<void> {
   if (!command) {
     return;
   }
-  const result = await execa(command, { cwd, shell: true, all: true, reject: false });
+  const parsed = parseConfiguredCommand(command, env);
+  const result = await execa(parsed.file, parsed.args, { cwd, all: true, reject: false });
   if (result.exitCode !== 0) {
     throw new Error(`Command failed: ${command}\n${result.all ?? ""}`);
   }
+}
+
+function parseConfiguredCommand(command: string, env: AppEnv): { file: string; args: string[] } {
+  if (/[\r\n|&;<>`]/.test(command)) {
+    throw new Error(`Configured command contains unsupported shell syntax: ${command}`);
+  }
+  const parts = splitCommand(command);
+  const file = parts[0];
+  if (!file) {
+    throw new Error("Configured command is empty");
+  }
+  const allowed = new Set(env.CONFIG_COMMAND_ALLOWLIST.split(",").map((item) => item.trim()).filter(Boolean));
+  if (allowed.size > 0 && !allowed.has(file)) {
+    throw new Error(`Configured command is not allowlisted: ${file}`);
+  }
+  return { file, args: parts.slice(1) };
+}
+
+function splitCommand(command: string): string[] {
+  const parts: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | undefined;
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index];
+    if (quote) {
+      if (char === quote) {
+        quote = undefined;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (current) {
+        parts.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += char;
+  }
+  if (quote) {
+    throw new Error(`Configured command has an unterminated quote: ${command}`);
+  }
+  if (current) {
+    parts.push(current);
+  }
+  return parts;
+}
+
+function safeArtifactPaths(repoDir: string, artifactPaths: string[]): string[] {
+  const root = resolve(repoDir);
+  return artifactPaths.map((artifactPath) => {
+    if (isAbsolute(artifactPath)) {
+      throw new Error(`Artifact path must be relative to the repository: ${artifactPath}`);
+    }
+    const resolved = resolve(root, artifactPath);
+    const rel = relative(root, resolved);
+    if (rel.startsWith("..") || isAbsolute(rel)) {
+      throw new Error(`Artifact path escapes the repository: ${artifactPath}`);
+    }
+    return resolved;
+  });
 }
 
 async function assertReposClean(repoWorks: RepoWork[]): Promise<void> {

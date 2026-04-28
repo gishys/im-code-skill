@@ -1,6 +1,7 @@
 import Fastify from "fastify";
+import { createDecipheriv, createHash, timingSafeEqual } from "node:crypto";
 import type { AppEnv } from "./config/env.js";
-import type { PendingInputAsset, ProjectConfig, TaskDraft, TaskExecutionMode, TaskFormInput, TaskScope, TaskType } from "./types.js";
+import type { PendingInputAsset, ProjectConfig, TaskDraft, TaskExecutionMode, TaskFormInput, TaskRecord, TaskScope, TaskType } from "./types.js";
 import type { FeishuClient } from "./feishu/client.js";
 import { parseFeishuActionEvent, parseFeishuMessageEvent, type FeishuActionEvent } from "./feishu/events.js";
 import { buildAssetPreviewCard, buildHelpCard, buildTaskCard, buildTaskFormCard } from "./feishu/cards.js";
@@ -15,8 +16,15 @@ export function createApp(input: {
   feishu: FeishuClient;
   assets: AssetService;
 }) {
-  const app = Fastify({ logger: true });
+  const app = Fastify({ logger: true, bodyLimit: input.env.REQUEST_BODY_LIMIT_BYTES });
   const ingestion = new TaskIngestionService(input.projects, input.tasks, input.feishu, input.assets, input.env.WORKSPACE_ROOT);
+
+  app.addHook("onRequest", async (_request, reply) => {
+    reply.header("X-Content-Type-Options", "nosniff");
+    reply.header("Referrer-Policy", "no-referrer");
+    reply.header("X-Frame-Options", "DENY");
+    reply.header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  });
 
   app.get("/health", async () => ({
     ok: true,
@@ -36,6 +44,9 @@ export function createApp(input: {
   }));
 
   app.get("/tasks/:id", async (request, reply) => {
+    if (!authorizeInternalApi(input.env, request.headers)) {
+      return reply.code(401).send({ error: "Unauthorized" });
+    }
     const id = (request.params as { id: string }).id;
     const task = input.tasks.tryGetTask(id);
     if (!task) {
@@ -45,6 +56,9 @@ export function createApp(input: {
   });
 
   app.get("/threads/:id", async (request, reply) => {
+    if (!authorizeInternalApi(input.env, request.headers)) {
+      return reply.code(401).send({ error: "Unauthorized" });
+    }
     const id = (request.params as { id: string }).id;
     const thread = input.tasks.tryGetThread(id);
     if (!thread) {
@@ -54,6 +68,9 @@ export function createApp(input: {
   });
 
   app.get("/changesets/:id", async (request, reply) => {
+    if (!authorizeInternalApi(input.env, request.headers)) {
+      return reply.code(401).send({ error: "Unauthorized" });
+    }
     const id = (request.params as { id: string }).id;
     const changeset = input.tasks.tryGetChangeset(id);
     if (!changeset) {
@@ -148,13 +165,24 @@ export function createApp(input: {
   });
 
   app.post("/feishu/events", async (request, reply) => {
-    const body = request.body as Record<string, unknown>;
+    const body = unwrapFeishuRequest(input.env, request.body as Record<string, unknown>);
+    if (!body) {
+      request.log.warn("Rejected unreadable Feishu event");
+      return reply.code(400).send({ error: "Invalid encrypted payload" });
+    }
+    if (!verifyFeishuRequest(input.env, body)) {
+      request.log.warn("Rejected unauthenticated Feishu event");
+      return reply.code(401).send({ error: "Unauthorized" });
+    }
     if (body.type === "url_verification") {
       return { challenge: body.challenge };
     }
 
     const cardAction = parseFeishuActionEvent(body);
     if (cardAction) {
+      if (!isAllowedFeishuChat(input.env, cardAction.chatId)) {
+        return reply.code(403).send({ error: "Chat is not allowed" });
+      }
       return handleCardAction(cardAction, input, reply);
     }
 
@@ -162,6 +190,10 @@ export function createApp(input: {
     if (!event) {
       request.log.info({ body }, "Ignored non-message Feishu event");
       return reply.code(202).send({ ok: true, ignored: true });
+    }
+    if (!isAllowedFeishuChat(input.env, event.chatId)) {
+      request.log.warn({ chatId: event.chatId }, "Rejected Feishu event from disallowed chat");
+      return reply.code(403).send({ error: "Chat is not allowed" });
     }
 
     if (!event.text.trim() && event.assets.length > 0) {
@@ -220,7 +252,15 @@ export function createApp(input: {
   });
 
   app.post("/feishu/actions", async (request, reply) => {
-    const body = request.body as Record<string, unknown>;
+    const body = unwrapFeishuRequest(input.env, request.body as Record<string, unknown>);
+    if (!body) {
+      request.log.warn("Rejected unreadable Feishu action");
+      return reply.code(400).send({ error: "Invalid encrypted payload" });
+    }
+    if (!verifyFeishuRequest(input.env, body)) {
+      request.log.warn("Rejected unauthenticated Feishu action");
+      return reply.code(401).send({ error: "Unauthorized" });
+    }
     if (body.type === "url_verification" || body.challenge) {
       return { challenge: body.challenge };
     }
@@ -228,6 +268,9 @@ export function createApp(input: {
     const action = parseFeishuActionEvent(body);
     if (!action) {
       return reply.code(400).send({ error: "Invalid action payload" });
+    }
+    if (!isAllowedFeishuChat(input.env, action.chatId)) {
+      return reply.code(403).send({ error: "Chat is not allowed" });
     }
     request.log.info(
       {
@@ -351,23 +394,27 @@ async function handleCardAction(
   if (!action.taskId) {
     return reply.code(400).send({ error: "Missing taskId" });
   }
+  const actionTask = input.tasks.getTask(action.taskId);
+  if (!isAuthorizedTaskAction(actionTask, action)) {
+    return reply.code(403).send({ error: "Action is not authorized for this task" });
+  }
   if (action.action === "approve") {
-    const task = input.tasks.getTask(action.taskId);
+    const task = actionTask;
     if (task.status !== "waiting_approval") {
       return cardActionResponse(buildTaskCard(task), `任务当前为 ${task.status}，无需再次确认执行`, "info");
     }
     return cardActionResponse(buildTaskCard(input.tasks.approveTask(action.taskId, action.userId)), "已确认执行");
   }
   if (action.action === "approve_plan_as_agent") {
-    const task = input.tasks.getTask(action.taskId);
+    const task = actionTask;
     if (task.executionMode !== "plan" || task.status !== "plan_ready") {
       return cardActionResponse(buildTaskCard(task), `任务当前为 ${task.status}，暂不能转为 Agent 执行`, "warning");
     }
     return cardActionResponse(buildTaskCard(input.tasks.approvePlanAsAgent(action.taskId, action.userId)), "已转为 Agent 执行");
   }
   if (action.action === "cancel") {
-    const task = input.tasks.getTask(action.taskId);
-    if (!["waiting_approval", "queued", "plan_ready", "created"].includes(task.status)) {
+    const task = actionTask;
+    if (!["waiting_approval", "queued", "running", "plan_ready", "created"].includes(task.status)) {
       return cardActionResponse(buildTaskCard(task), `任务当前为 ${task.status}，不能取消`, "warning");
     }
     return cardActionResponse(buildTaskCard(input.tasks.cancelTask(action.taskId, action.userId)), "已取消任务");
@@ -378,8 +425,15 @@ async function handleCardAction(
   if (action.action === "approve_plan") {
     return cardActionResponse(buildTaskCard(input.tasks.approveLatestPlan(action.taskId, action.userId)), "Latest plan approved for execution");
   }
+  if (action.action === "retry") {
+    const task = actionTask;
+    if (!["failed", "interrupted"].includes(task.status)) {
+      return cardActionResponse(buildTaskCard(task), `任务当前为 ${task.status}，无需再次执行`, "info");
+    }
+    return cardActionResponse(buildTaskCard(input.tasks.retryTask(action.taskId, action.userId)), "已重新加入执行队列");
+  }
   if (["revise_plan", "continue_task", "add_followup_task", "create_pr", "split_pr", "view_history"].includes(action.action)) {
-    const task = input.tasks.getTask(action.taskId);
+    const task = actionTask;
     input.tasks.addTaskMessage({
       threadId: task.threadId,
       taskId: task.id,
@@ -875,6 +929,72 @@ function toastOnly(content: string, type: "success" | "warning" | "info" = "succ
       content
     }
   };
+}
+
+function authorizeInternalApi(env: AppEnv, headers: Record<string, string | string[] | undefined>): boolean {
+  if (!env.INTERNAL_API_TOKEN) {
+    return true;
+  }
+  const authorization = firstHeader(headers.authorization);
+  const bearer = authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
+  const token = bearer ?? firstHeader(headers["x-api-token"]);
+  return safeEqual(token, env.INTERNAL_API_TOKEN);
+}
+
+function verifyFeishuRequest(env: AppEnv, body: Record<string, unknown>): boolean {
+  if (!env.FEISHU_VERIFICATION_TOKEN) {
+    return true;
+  }
+  const header = (body.header ?? {}) as Record<string, unknown>;
+  const token = String(body.token ?? header.token ?? "");
+  return safeEqual(token, env.FEISHU_VERIFICATION_TOKEN);
+}
+
+function unwrapFeishuRequest(env: AppEnv, body: Record<string, unknown>): Record<string, unknown> | null {
+  if (!env.FEISHU_ENCRYPT_KEY || typeof body.encrypt !== "string") {
+    return body;
+  }
+  try {
+    const key = createHash("sha256").update(env.FEISHU_ENCRYPT_KEY).digest();
+    const decipher = createDecipheriv("aes-256-cbc", key, key.subarray(0, 16));
+    const decrypted = Buffer.concat([decipher.update(body.encrypt, "base64"), decipher.final()]).toString("utf8");
+    const parsed = JSON.parse(decrypted) as unknown;
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isAllowedFeishuChat(env: AppEnv, chatId?: string): boolean {
+  const allowed = env.FEISHU_ALLOWED_CHAT_IDS.split(",").map((item) => item.trim()).filter(Boolean);
+  return allowed.length === 0 || Boolean(chatId && allowed.includes(chatId));
+}
+
+function isAuthorizedTaskAction(task: TaskRecord, action: FeishuActionEvent): boolean {
+  if (task.feishuChatId && action.chatId && task.feishuChatId !== action.chatId) {
+    return false;
+  }
+  if (task.feishuUserId && action.userId && task.feishuUserId !== action.userId && action.action !== "status") {
+    return false;
+  }
+  return true;
+}
+
+function firstHeader(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function safeEqual(left?: string, right?: string): boolean {
+  if (!left || !right) {
+    return false;
+  }
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
 }
 
 function parseTaskFormInput(values: Record<string, string>): { ok: true; value: TaskFormInput } | { ok: false; error: string } {

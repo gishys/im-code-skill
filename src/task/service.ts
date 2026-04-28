@@ -303,7 +303,7 @@ export class TaskService {
       .prepare(
         `UPDATE tasks
          SET status = 'canceled', approval_status = 'rejected', current_stage = 'failed', updated_at = ?, finished_at = ?
-         WHERE id = ? AND status IN ('created', 'waiting_approval', 'queued', 'plan_ready')`
+         WHERE id = ? AND status IN ('created', 'waiting_approval', 'queued', 'running', 'plan_ready')`
       )
       .run(timestamp, timestamp, id);
     if (result.changes === 0) {
@@ -313,6 +313,27 @@ export class TaskService {
       .prepare("INSERT INTO approvals (id, task_id, action, feishu_user_id, created_at) VALUES (?, ?, ?, ?, ?)")
       .run(randomUUID(), id, "canceled", feishuUserId ?? null, timestamp);
     this.addEvent(id, "canceled", "failed", "Task canceled by user");
+    return this.getTask(id);
+  }
+
+  retryTask(id: string, feishuUserId?: string): TaskRecord {
+    const timestamp = now();
+    const result = this.db
+      .prepare(
+        `UPDATE tasks
+         SET status = 'queued', approval_status = 'approved', current_stage = 'queued',
+             failure_stage = NULL, failure_summary = NULL, locked_by = NULL, locked_at = NULL,
+             heartbeat_at = NULL, started_at = NULL, finished_at = NULL, updated_at = ?
+         WHERE id = ? AND status IN ('failed', 'interrupted')`
+      )
+      .run(timestamp, id);
+    if (result.changes === 0) {
+      return this.getTask(id);
+    }
+    this.db
+      .prepare("INSERT INTO approvals (id, task_id, action, feishu_user_id, created_at) VALUES (?, ?, ?, ?, ?)")
+      .run(randomUUID(), id, "retry", feishuUserId ?? null, timestamp);
+    this.addEvent(id, "retry", "queued", "Task queued for retry");
     return this.getTask(id);
   }
 
@@ -578,12 +599,15 @@ export class TaskService {
 
   markFailed(id: string, stage: string, summary: string): void {
     const timestamp = now();
-    this.db
+    const result = this.db
       .prepare(
         `UPDATE tasks SET status = 'failed', current_stage = 'failed', failure_stage = ?, failure_summary = ?,
-         updated_at = ?, finished_at = ? WHERE id = ?`
+         updated_at = ?, finished_at = ? WHERE id = ? AND status != 'canceled'`
       )
       .run(stage, summary, timestamp, timestamp, id);
+    if (result.changes === 0) {
+      return;
+    }
     this.addEvent(id, "failed", "failed", summary, { stage });
   }
 

@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
+import { createCipheriv, createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -44,6 +45,111 @@ const fakeFeishu = {
 } as unknown as FeishuClient;
 
 describe("Feishu card actions", () => {
+  it("protects internal task details when an API token is configured", async () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(schemaSql);
+    const tasks = new TaskService(db);
+    const task = tasks.createTask({
+      parsed: {
+        projectName: "demo-app",
+        executionMode: "plan",
+        taskType: "bug",
+        scope: "frontend",
+        description: "fix"
+      },
+      rawText: "raw",
+      autoApproved: true
+    });
+    const app = createApp({
+      env: loadEnv({
+        PORT: "3005",
+        WORKER_ENABLED: "false",
+        DATABASE_PATH: ":memory:",
+        INTERNAL_API_TOKEN: "secret-token"
+      }),
+      projects,
+      tasks,
+      feishu: fakeFeishu,
+      assets: new AssetService(db, fakeFeishu)
+    });
+
+    const rejected = await app.inject({ method: "GET", url: `/tasks/${task.id}` });
+    const accepted = await app.inject({
+      method: "GET",
+      url: `/tasks/${task.id}`,
+      headers: { authorization: "Bearer secret-token" }
+    });
+
+    expect(rejected.statusCode).toBe(401);
+    expect(accepted.statusCode).toBe(200);
+    expect(accepted.json()).toEqual(expect.objectContaining({ id: task.id }));
+  });
+
+  it("rejects Feishu callbacks when the verification token is wrong", async () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(schemaSql);
+    const app = createApp({
+      env: loadEnv({
+        PORT: "3005",
+        WORKER_ENABLED: "false",
+        DATABASE_PATH: ":memory:",
+        FEISHU_VERIFICATION_TOKEN: "expected-token"
+      }),
+      projects,
+      tasks: new TaskService(db),
+      feishu: fakeFeishu,
+      assets: new AssetService(db, fakeFeishu)
+    });
+
+    const rejected = await app.inject({
+      method: "POST",
+      url: "/feishu/events",
+      payload: { token: "wrong-token", type: "url_verification", challenge: "challenge" }
+    });
+    const accepted = await app.inject({
+      method: "POST",
+      url: "/feishu/events",
+      payload: { token: "expected-token", type: "url_verification", challenge: "challenge" }
+    });
+
+    expect(rejected.statusCode).toBe(401);
+    expect(accepted.statusCode).toBe(200);
+    expect(accepted.json()).toEqual({ challenge: "challenge" });
+  });
+
+  it("accepts encrypted Feishu URL verification callbacks", async () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(schemaSql);
+    const app = createApp({
+      env: loadEnv({
+        PORT: "3005",
+        WORKER_ENABLED: "false",
+        DATABASE_PATH: ":memory:",
+        FEISHU_VERIFICATION_TOKEN: "expected-token",
+        FEISHU_ENCRYPT_KEY: "encrypt-key"
+      }),
+      projects,
+      tasks: new TaskService(db),
+      feishu: fakeFeishu,
+      assets: new AssetService(db, fakeFeishu)
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/feishu/events",
+      payload: {
+        encrypt: encryptFeishuPayload("encrypt-key", {
+          token: "expected-token",
+          type: "url_verification",
+          challenge: "challenge"
+        })
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ challenge: "challenge" });
+  });
+
   it("stores pure attachment messages as pending assets instead of creating tasks", async () => {
     const db = new DatabaseSync(":memory:");
     db.exec(schemaSql);
@@ -860,4 +966,63 @@ describe("Feishu card actions", () => {
     );
     expect(row).toEqual({ execution_mode: "agent", status: "queued", plan_summary: "Plan body" });
   });
+
+  it("requeues a failed task from the retry card action", async () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(schemaSql);
+    const tasks = new TaskService(db);
+    const task = tasks.createTask({
+      parsed: {
+        projectName: "demo-app",
+        executionMode: "agent",
+        taskType: "bug",
+        scope: "frontend",
+        description: "fix clone failure"
+      },
+      rawText: "raw",
+      autoApproved: true
+    });
+    tasks.markFailed(task.id, "cloning", "clone failed");
+    const app = createApp({
+      env: loadEnv({
+        PORT: "3005",
+        WORKER_ENABLED: "false",
+        DATABASE_PATH: ":memory:"
+      }),
+      projects,
+      tasks,
+      feishu: fakeFeishu,
+      assets: new AssetService(db, fakeFeishu)
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/feishu/actions",
+      payload: {
+        event: {
+          open_chat_id: "oc_group",
+          open_message_id: "om_failed",
+          operator: { open_id: "ou_a" },
+          action: {
+            value: { action: "retry", taskId: task.id }
+          }
+        }
+      }
+    });
+
+    const row = db.prepare("SELECT status, current_stage, failure_stage, failure_summary FROM tasks WHERE id = ?").get(task.id) as {
+      status: string;
+      current_stage: string;
+      failure_stage: string | null;
+      failure_summary: string | null;
+    };
+    expect(response.statusCode).toBe(200);
+    expect(row).toEqual({ status: "queued", current_stage: "queued", failure_stage: null, failure_summary: null });
+  });
 });
+
+function encryptFeishuPayload(encryptKey: string, payload: Record<string, unknown>): string {
+  const key = createHash("sha256").update(encryptKey).digest();
+  const cipher = createCipheriv("aes-256-cbc", key, key.subarray(0, 16));
+  return Buffer.concat([cipher.update(JSON.stringify(payload), "utf8"), cipher.final()]).toString("base64");
+}

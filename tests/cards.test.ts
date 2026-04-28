@@ -133,13 +133,13 @@ describe("buildTaskFormCard", () => {
     expect(actionBlock?.actions?.some((button) => button.value?.action === "approve")).toBe(false);
   });
 
-  it("hides confirm and retry actions while a task is executing", () => {
+  it("allows cancellation while a task is executing", () => {
     const card = buildTaskCard(taskRecord({ status: "running", currentStage: "codex_running" })) as {
       elements: Array<{ tag: string; actions?: Array<{ value?: { action?: string } }> }>;
     };
     const actions = card.elements.find((element) => element.tag === "action")?.actions ?? [];
 
-    expect(actions.map((button) => button.value?.action)).toEqual(["status"]);
+    expect(actions.map((button) => button.value?.action)).toEqual(["cancel", "status"]);
   });
 
   it("shows confirmation only while waiting for approval", () => {
@@ -149,6 +149,15 @@ describe("buildTaskFormCard", () => {
     const actions = card.elements.find((element) => element.tag === "action")?.actions ?? [];
 
     expect(actions.map((button) => button.value?.action)).toEqual(["approve", "cancel", "status"]);
+  });
+
+  it("shows a retry action after a task fails", () => {
+    const card = buildTaskCard(taskRecord({ status: "failed", currentStage: "failed", failureSummary: "clone failed" })) as {
+      elements: Array<{ tag: string; actions?: Array<{ value?: { action?: string } }> }>;
+    };
+    const actions = card.elements.find((element) => element.tag === "action")?.actions ?? [];
+
+    expect(actions.map((button) => button.value?.action)).toEqual(["status", "retry"]);
   });
 });
 

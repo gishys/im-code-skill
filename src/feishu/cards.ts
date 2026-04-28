@@ -453,8 +453,12 @@ function taskActionsForStatus(task: TaskRecord): object[] {
     ];
   }
 
-  if (task.status === "created" || task.status === "queued") {
+  if (task.status === "created" || task.status === "queued" || task.status === "running") {
     return [dangerButton("cancel", task.id, "取消任务"), statusButton(task.id)];
+  }
+
+  if (task.status === "failed") {
+    return [statusButton(task.id), primaryButton("retry", task.id, "再次执行")];
   }
 
   return [statusButton(task.id)];

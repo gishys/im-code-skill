@@ -25,6 +25,7 @@ export interface CodexProgressUpdate {
 
 export interface CodexRunOptions {
   onProgress?: (update: CodexProgressUpdate) => void | Promise<void>;
+  shouldCancel?: () => boolean | Promise<boolean>;
 }
 
 export async function runCodex(env: AppEnv, task: TaskRecord, repoDirs: string[], workspace: string, options: CodexRunOptions = {}): Promise<CodexRunResult> {
@@ -93,12 +94,30 @@ export async function runCodexPlan(env: AppEnv, task: TaskRecord, repoDirs: stri
 async function runCodexCommand(env: AppEnv, workspace: string, prompt: string, options: CodexRunOptions): Promise<{ all?: string; exitCode?: number | null }> {
   let output = "";
   let progressQueue = Promise.resolve();
+  let canceled = false;
   const child = execa(env.CODEX_COMMAND, ["exec", "--", prompt], {
     cwd: workspace,
     all: true,
     timeout: env.CODEX_TIMEOUT_SECONDS * 1000,
     reject: false
   });
+
+  const cancelTimer = options.shouldCancel
+    ? setInterval(() => {
+        Promise.resolve(options.shouldCancel?.())
+          .then((shouldCancel) => {
+            if (!shouldCancel || canceled) {
+              return;
+            }
+            canceled = true;
+            output += "\n[task canceled by user]\n";
+            child.kill("SIGTERM");
+          })
+          .catch(() => {
+            // Cancellation checks are best-effort; the run should continue if the check itself fails.
+          });
+      }, 1000)
+    : undefined;
 
   child.all?.on("data", (data: Buffer | string) => {
     const chunk = redactSecrets(data.toString());
@@ -116,12 +135,19 @@ async function runCodexCommand(env: AppEnv, workspace: string, prompt: string, o
       });
   });
 
-  const result = await child;
-  await progressQueue;
-  return {
-    ...result,
-    all: output || result.all
-  };
+  try {
+    const result = await child;
+    await progressQueue;
+    return {
+      ...result,
+      exitCode: canceled ? 130 : result.exitCode,
+      all: output || result.all
+    };
+  } finally {
+    if (cancelTimer) {
+      clearInterval(cancelTimer);
+    }
+  }
 }
 
 function buildCodexPrompt(task: TaskRecord, repoDirs: string[], maxChars: number, handoffPath: string): string {
