@@ -1,4 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/app.js";
 import { loadEnv } from "../src/config/env.js";
@@ -80,6 +82,55 @@ describe("Feishu card actions", () => {
     expect(response.json()).toEqual(expect.objectContaining({ pendingAssets: 1 }));
     expect(taskCount.count).toBe(0);
     expect(pendingCount.count).toBe(1);
+  });
+
+  it("does not auto-update an active form card when attachments arrive", async () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(schemaSql);
+    const updateTaskCard = vi.fn(async () => undefined);
+    const sendText = vi.fn(async () => "om_text");
+    const assets = new AssetService(db, {
+      ...fakeFeishu,
+      updateTaskCard,
+      sendText
+    } as unknown as FeishuClient);
+    const draft = assets.createDraft({ chatId: "oc_group", userId: "ou_a" });
+    assets.setDraftFormMessageId(draft.id, "om_form");
+    const app = createApp({
+      env: loadEnv({
+        PORT: "3005",
+        WORKER_ENABLED: "false",
+        DATABASE_PATH: ":memory:"
+      }),
+      projects,
+      tasks: new TaskService(db),
+      feishu: {
+        ...fakeFeishu,
+        updateTaskCard,
+        sendText
+      } as unknown as FeishuClient,
+      assets
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/feishu/events",
+      payload: {
+        event: {
+          sender: { sender_id: { open_id: "ou_a" } },
+          message: {
+            chat_id: "oc_group",
+            message_id: "om_img",
+            message_type: "image",
+            content: JSON.stringify({ image_key: "img_1", file_name: "screen.png" })
+          }
+        }
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(updateTaskCard).not.toHaveBeenCalled();
+    expect(sendText).toHaveBeenCalledWith("oc_group", expect.stringContaining("刷新"));
   });
 
   it("warns when attachment notes are submitted without selected attachments", async () => {
@@ -273,14 +324,25 @@ describe("Feishu card actions", () => {
           open_message_id: "om_form",
           operator: { open_id: "ou_a" },
           action: {
-            value: { action: "refresh_task_form_assets", draftId: draft.id }
+            value: { action: "refresh_task_form_assets", draftId: draft.id },
+            form_value: {
+              projectName: "demo-app",
+              executionMode: "agent",
+              taskType: "bug",
+              scope: "frontend",
+              description: "keep this description"
+            }
           }
         }
       }
     });
 
+    const updatedCard = (updateTaskCard.mock.calls as unknown[][])[0][1] as { elements: Array<Record<string, unknown>> };
+    const form = updatedCard.elements.find((element) => element.tag === "form") as { elements: Array<Record<string, unknown>> };
+    const description = form.elements.find((element) => element.name === "description") as { default_value?: string };
     expect(response.statusCode).toBe(200);
     expect(updateTaskCard).toHaveBeenCalledWith("om_form", expect.objectContaining({ header: expect.any(Object) }));
+    expect(description.default_value).toBe("keep this description");
     expect(response.json()).toEqual(
       expect.objectContaining({
         toast: expect.objectContaining({
@@ -289,6 +351,276 @@ describe("Feishu card actions", () => {
       })
     );
     expect(response.json()).not.toHaveProperty("card");
+  });
+
+  it("sends an image preview card without replacing the active form card", async () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(schemaSql);
+    const sendTaskCard = vi.fn(async () => "om_preview");
+    const updateTaskCard = vi.fn(async () => undefined);
+    const feishu = {
+      ...fakeFeishu,
+      sendTaskCard,
+      updateTaskCard
+    } as unknown as FeishuClient;
+    const assets = new AssetService(db, feishu);
+    const draft = assets.createDraft({ chatId: "oc_group", userId: "ou_a", sourceMessageId: "om_source" });
+    const saved = await assets.savePendingAssets({
+      chatId: "oc_group",
+      userId: "ou_a",
+      messageId: "om_img",
+      assets: [{ assetType: "image", feishuFileKey: "img_1", fileName: "screen.png", mimeType: "image/png" }]
+    });
+    const app = createApp({
+      env: loadEnv({
+        PORT: "3005",
+        WORKER_ENABLED: "false",
+        DATABASE_PATH: ":memory:"
+      }),
+      projects,
+      tasks: new TaskService(db),
+      feishu,
+      assets
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/feishu/actions",
+      payload: {
+        event: {
+          open_chat_id: "oc_group",
+          open_message_id: "om_form",
+          operator: { open_id: "ou_a" },
+          action: {
+            value: { action: "preview_task_form_asset", draftId: draft.id, assetId: saved.saved[0]!.id }
+          }
+        }
+      }
+    });
+
+    const previewCard = (sendTaskCard.mock.calls as unknown[][])[0][1] as { elements: Array<Record<string, unknown>> };
+    expect(response.statusCode).toBe(200);
+    expect(updateTaskCard).not.toHaveBeenCalled();
+    expect(sendTaskCard).toHaveBeenCalledWith("oc_group", expect.objectContaining({ header: expect.any(Object) }));
+    expect(previewCard.elements).toEqual([expect.objectContaining({ tag: "img", img_key: "img_1", preview: true })]);
+  });
+
+  it("renders the mobile web form with per-image preview controls", async () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(schemaSql);
+    const assets = new AssetService(db, fakeFeishu);
+    const draft = assets.createDraft({ chatId: "oc_group", userId: "ou_a", sourceMessageId: "om_source" });
+    await assets.savePendingAssets({
+      chatId: "oc_group",
+      userId: "ou_a",
+      messageId: "om_img",
+      assets: [
+        { assetType: "image", feishuFileKey: "img_1", fileName: "screen.png", mimeType: "image/png" },
+        { assetType: "file", feishuFileKey: "file_1", fileName: "notes.txt", mimeType: "text/plain" }
+      ]
+    });
+    const app = createApp({
+      env: loadEnv({ PORT: "3005", WORKER_ENABLED: "false", DATABASE_PATH: ":memory:" }),
+      projects,
+      tasks: new TaskService(db),
+      feishu: fakeFeishu,
+      assets
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/forms/tasks/${draft.id}?token=${draft.formToken}`
+    });
+    const html = response.body;
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("text/html");
+    expect(html).toContain("填写 Codex 任务表单");
+    expect(html).toContain("screen.png");
+    expect(html).toContain("data-preview=");
+    expect(html).toContain("notes.txt");
+    expect(html).toContain("100svh");
+    expect(html).toContain("keepFieldVisible");
+    expect(html).toContain("returnToFeishuConversation");
+    expect(html).toContain("任务已提交，正在返回飞书会话");
+    expect(html).not.toContain("window.scrollTo(0, 0)");
+    expect(html).toContain("不可预览");
+  });
+
+  it("rejects mobile web forms with an invalid token", async () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(schemaSql);
+    const assets = new AssetService(db, fakeFeishu);
+    const draft = assets.createDraft({ chatId: "oc_group", userId: "ou_a", sourceMessageId: "om_source" });
+    const app = createApp({
+      env: loadEnv({ PORT: "3005", WORKER_ENABLED: "false", DATABASE_PATH: ":memory:" }),
+      projects,
+      tasks: new TaskService(db),
+      feishu: fakeFeishu,
+      assets
+    });
+
+    const response = await app.inject({ method: "GET", url: `/forms/tasks/${draft.id}?token=bad` });
+
+    expect(response.statusCode).toBe(403);
+  });
+
+  it("submits the mobile web form and links selected attachments", async () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(schemaSql);
+    const updateTaskCard = vi.fn(async () => undefined);
+    const feishu = {
+      ...fakeFeishu,
+      updateTaskCard,
+      async downloadMessageResource(input: { destination: string }) {
+        await mkdir(dirname(input.destination), { recursive: true });
+        await writeFile(input.destination, "asset");
+        return input.destination;
+      }
+    } as unknown as FeishuClient;
+    const assets = new AssetService(db, feishu);
+    const draft = assets.createDraft({ chatId: "oc_group", userId: "ou_a", sourceMessageId: "om_source" });
+    assets.setDraftFormMessageId(draft.id, "om_form");
+    const saved = await assets.savePendingAssets({
+      chatId: "oc_group",
+      userId: "ou_a",
+      messageId: "om_img",
+      assets: [{ assetType: "image", feishuFileKey: "img_1", fileName: "screen.png", mimeType: "image/png" }]
+    });
+    const app = createApp({
+      env: loadEnv({ PORT: "3005", WORKER_ENABLED: "false", DATABASE_PATH: ":memory:" }),
+      projects,
+      tasks: new TaskService(db),
+      feishu,
+      assets
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/forms/tasks/${draft.id}/submit?token=${draft.formToken}`,
+      payload: {
+        projectName: "demo-app",
+        executionMode: "plan",
+        taskType: "bug",
+        scope: "frontend",
+        description: "fix from web",
+        selectedAssetIds: [saved.saved[0]!.id],
+        attachmentNote: "图1是当前效果"
+      }
+    });
+    const inputCount = db.prepare("SELECT COUNT(*) AS count FROM input_assets").get() as { count: number };
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual(expect.objectContaining({ ok: true, taskId: expect.any(String) }));
+    expect(inputCount.count).toBe(1);
+    expect(updateTaskCard).toHaveBeenCalledWith("om_form", expect.objectContaining({ header: expect.any(Object) }));
+  });
+
+  it("proxies pending image previews for the mobile web form", async () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(schemaSql);
+    const feishu = {
+      ...fakeFeishu,
+      async downloadMessageResource(input: { destination: string }) {
+        await mkdir(dirname(input.destination), { recursive: true });
+        await writeFile(input.destination, "image-bytes");
+        return input.destination;
+      }
+    } as unknown as FeishuClient;
+    const assets = new AssetService(db, feishu);
+    const draft = assets.createDraft({ chatId: "oc_group", userId: "ou_a", sourceMessageId: "om_source" });
+    const saved = await assets.savePendingAssets({
+      chatId: "oc_group",
+      userId: "ou_a",
+      messageId: "om_img",
+      assets: [{ assetType: "image", feishuFileKey: "img_1", fileName: "screen.png", mimeType: "image/png" }]
+    });
+    const app = createApp({
+      env: loadEnv({ PORT: "3005", WORKER_ENABLED: "false", DATABASE_PATH: ":memory:" }),
+      projects,
+      tasks: new TaskService(db),
+      feishu,
+      assets
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/forms/tasks/${draft.id}/assets/${saved.saved[0]!.id}/preview?token=${draft.formToken}`
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("image/png");
+    expect(response.body).toBe("image-bytes");
+  });
+
+  it("refreshes mobile web form assets after the form is opened", async () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(schemaSql);
+    const assets = new AssetService(db, fakeFeishu);
+    const draft = assets.createDraft({ chatId: "oc_group", userId: "ou_a", sourceMessageId: "om_source" });
+    const app = createApp({
+      env: loadEnv({ PORT: "3005", WORKER_ENABLED: "false", DATABASE_PATH: ":memory:" }),
+      projects,
+      tasks: new TaskService(db),
+      feishu: fakeFeishu,
+      assets
+    });
+
+    await assets.savePendingAssets({
+      chatId: "oc_group",
+      userId: "ou_a",
+      messageId: "om_video",
+      assets: [{ assetType: "video", feishuFileKey: "video_1", fileName: "recording.mp4", mimeType: "video/mp4" }]
+    });
+    const response = await app.inject({
+      method: "GET",
+      url: `/forms/tasks/${draft.id}/assets?token=${draft.formToken}`
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual(
+      expect.objectContaining({
+        ok: true,
+        assets: [expect.objectContaining({ assetType: "video", fileName: "recording.mp4" })]
+      })
+    );
+  });
+
+  it("proxies pending video previews for the mobile web form", async () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(schemaSql);
+    const feishu = {
+      ...fakeFeishu,
+      async downloadMessageResource(input: { destination: string }) {
+        await mkdir(dirname(input.destination), { recursive: true });
+        await writeFile(input.destination, "video-bytes");
+        return input.destination;
+      }
+    } as unknown as FeishuClient;
+    const assets = new AssetService(db, feishu);
+    const draft = assets.createDraft({ chatId: "oc_group", userId: "ou_a", sourceMessageId: "om_source" });
+    const saved = await assets.savePendingAssets({
+      chatId: "oc_group",
+      userId: "ou_a",
+      messageId: "om_video",
+      assets: [{ assetType: "video", feishuFileKey: "video_1", fileName: "recording.mp4", mimeType: "video/mp4" }]
+    });
+    const app = createApp({
+      env: loadEnv({ PORT: "3005", WORKER_ENABLED: "false", DATABASE_PATH: ":memory:" }),
+      projects,
+      tasks: new TaskService(db),
+      feishu,
+      assets
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/forms/tasks/${draft.id}/assets/${saved.saved[0]!.id}/preview?token=${draft.formToken}`
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("video/mp4");
+    expect(response.body).toBe("video-bytes");
   });
 
   it("defaults submitted forms to plan mode", async () => {
@@ -518,6 +850,14 @@ describe("Feishu card actions", () => {
       plan_summary: string;
     };
     expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual(
+      expect.objectContaining({
+        card: expect.objectContaining({
+          type: "raw",
+          data: expect.objectContaining({ header: expect.any(Object) })
+        })
+      })
+    );
     expect(row).toEqual({ execution_mode: "agent", status: "queued", plan_summary: "Plan body" });
   });
 });

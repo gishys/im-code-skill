@@ -12,16 +12,25 @@ export interface FeishuMessageEvent {
 export interface FeishuActionEvent {
   action:
     | "approve"
+    | "approve_plan"
     | "approve_plan_as_agent"
     | "cancel"
+    | "continue_task"
+    | "create_pr"
+    | "split_pr"
     | "status"
     | "retry"
+    | "revise_plan"
+    | "view_history"
+    | "add_followup_task"
     | "open_task_form"
     | "submit_task_form"
+    | "preview_task_form_asset"
     | "refresh_task_form_assets"
     | "open_help";
   taskId?: string;
   draftId?: string;
+  assetId?: string;
   userId?: string;
   chatId?: string;
   messageId?: string;
@@ -82,12 +91,13 @@ export function parseFeishuActionEvent(body: unknown): FeishuActionEvent | undef
   const actionName = value.action as FeishuActionEvent["action"] | undefined;
   const taskId = value.taskId as string | undefined;
   const draftId = value.draftId as string | undefined;
+  const assetId = value.assetId as string | undefined;
   const formValues = normalizeFormValues(action.form_value ?? action.formValue ?? event.form_value ?? root.form_value);
 
   if (!actionName) {
     return undefined;
   }
-  return { action: actionName, taskId, draftId, userId, chatId, messageId, formValues };
+  return { action: actionName, taskId, draftId, assetId, userId, chatId, messageId, formValues };
 }
 
 export function isFeishuCardActionEvent(body: unknown): boolean {

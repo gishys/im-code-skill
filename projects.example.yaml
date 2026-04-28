@@ -1,20 +1,28 @@
 projects:
-  - name: 空间数据管理平台
+  - name: example-project
     default_branch: main
     frontend:
-      repo: https://github.com/gishys/Spatial_data_management_platform.git
+      repo: https://github.com/example/frontend.git
       install: npm ci
       test: npm test
       build: npm run build
       artifact_paths:
         - dist
     backend:
-      repo: https://github.com/gishys/Hx.Abp.Geo.git
+      repo: https://github.com/example/backend.git
       install: dotnet restore
       test: dotnet test
       build: dotnet build
       artifact_paths:
-        - src/Hx.Abp.Geo.HttpApi.Host/bin
+        - src/Example.HttpApi.Host/bin
     package:
       format: zip
       name_template: "{project}-{scope}-{taskId}-{timestamp}.zip"
+    auto_approve_rules:
+      users:
+        - ou_example
+      task_types:
+        - bug
+      scopes:
+        - frontend
+        - backend

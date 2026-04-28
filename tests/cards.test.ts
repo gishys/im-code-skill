@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildTaskCard, buildTaskFormCard } from "../src/feishu/cards.js";
+import { buildAssetPreviewCard, buildTaskCard, buildTaskFormCard } from "../src/feishu/cards.js";
 import type { PendingInputAsset, ProjectConfig, TaskRecord } from "../src/types.js";
 
 const projects: ProjectConfig[] = [
@@ -45,33 +45,73 @@ describe("buildTaskFormCard", () => {
     expect(select.options).toEqual([expect.objectContaining({ value: "asset-1" })]);
   });
 
-  it("keeps the attachment selector visible when there are no pending assets", () => {
+  it("renders a mobile web form entry without an outer attachment refresh when a form URL is provided", () => {
+    const card = buildTaskFormCard(projects, {
+      draftId: "draft-1",
+      assetCandidates: [pendingAsset("asset-1", "image")],
+      formUrl: "https://example.test/forms/tasks/draft-1?token=t"
+    }) as { elements: Array<Record<string, unknown>> };
+    const form = card.elements.find((element) => element.tag === "form");
+    const actionBlocks = card.elements.filter((element) => element.tag === "action") as Array<{ actions: Array<{ url?: string; value?: { action?: string } }> }>;
+
+    expect(form).toBeUndefined();
+    expect(actionBlocks.some((block) => block.actions.some((button) => button.url === "https://example.test/forms/tasks/draft-1?token=t"))).toBe(true);
+    expect(actionBlocks.some((block) => block.actions.some((button) => button.value?.action === "refresh_task_form_assets"))).toBe(false);
+  });
+
+  it("renders compact image preview buttons without embedding images in the form card", () => {
+    const card = buildTaskFormCard(projects, {
+      draftId: "draft-1",
+      assetCandidates: [pendingAsset("asset-1", "image"), pendingAsset("asset-2", "file")]
+    }) as { elements: Array<Record<string, unknown>> };
+    const images = card.elements.filter((element) => element.tag === "img");
+    const actionBlocks = card.elements.filter((element) => element.tag === "action") as Array<{ actions: Array<{ value?: { action?: string; assetId?: string } }> }>;
+
+    expect(images).toEqual([]);
+    expect(
+      actionBlocks.some((block) =>
+        block.actions.some((button) => button.value?.action === "preview_task_form_asset" && button.value.assetId === "asset-1")
+      )
+    ).toBe(true);
+  });
+
+  it("renders a focused image preview card", () => {
+    const card = buildAssetPreviewCard(pendingAsset("asset-1", "image")) as { elements: Array<Record<string, unknown>> };
+
+    expect(card.elements).toEqual([expect.objectContaining({ tag: "img", img_key: "file_asset-1", preview: true })]);
+  });
+
+  it("keeps the attachment selector visible but disabled when there are no pending assets", () => {
     const card = buildTaskFormCard(projects, { draftId: "draft-1" }) as { elements: Array<Record<string, unknown>> };
     const form = card.elements.find((element) => element.tag === "form") as { elements: Array<Record<string, unknown>> };
     const select = form.elements.find((element) => element.name === "selectedAssetIds") as {
       tag: string;
       options: Array<{ value: string }>;
+      disabled?: boolean;
     };
 
     expect(select).toEqual(
       expect.objectContaining({
         tag: "multi_select_static",
-        options: [expect.objectContaining({ value: "__no_pending_assets__" })]
+        disabled: true,
+        options: []
       })
     );
   });
 
-  it("keeps non-submit buttons outside the form container", () => {
+  it("keeps help outside the form container and refresh as a form-submit button", () => {
     const card = buildTaskFormCard(projects, { draftId: "draft-1" }) as { elements: Array<Record<string, unknown>> };
     const form = card.elements.find((element) => element.tag === "form") as { elements: Array<Record<string, unknown>> };
     const formButtons = form.elements.filter((element) => element.tag === "button") as Array<{ value?: { action?: string } }>;
     const actionBlocks = card.elements.filter((element) => element.tag === "action") as Array<{ actions: Array<{ value?: { action?: string } }> }>;
 
     expect(formButtons.some((button) => button.value?.action === "open_help")).toBe(false);
-    expect(formButtons.some((button) => button.value?.action === "refresh_task_form_assets")).toBe(false);
-    expect(formButtons).toEqual([expect.objectContaining({ value: expect.objectContaining({ action: "submit_task_form" }) })]);
+    expect(formButtons).toEqual([
+      expect.objectContaining({ value: expect.objectContaining({ action: "refresh_task_form_assets" }) }),
+      expect.objectContaining({ value: expect.objectContaining({ action: "submit_task_form" }) })
+    ]);
     expect(actionBlocks.some((block) => block.actions.some((button) => button.value?.action === "open_help"))).toBe(true);
-    expect(actionBlocks.some((block) => block.actions.some((button) => button.value?.action === "refresh_task_form_assets"))).toBe(true);
+    expect(actionBlocks.some((block) => block.actions.some((button) => button.value?.action === "refresh_task_form_assets"))).toBe(false);
   });
 
   it("renders the execution mode field without forcing a card-level default", () => {

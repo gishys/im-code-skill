@@ -46,6 +46,33 @@ describe("AssetService", () => {
     expect(candidates[0]).toEqual(expect.objectContaining({ feishuUserId: "ou_a", fileName: "a.png" }));
   });
 
+  it("creates a form token and validates active draft access", () => {
+    const { assets } = createServices();
+    const draft = assets.createDraft({ chatId: "oc_group", userId: "ou_a" });
+
+    expect(draft.formToken).toHaveLength(64);
+    expect(assets.verifyDraftFormToken(draft.id, draft.formToken)).toEqual(expect.objectContaining({ id: draft.id }));
+    expect(assets.verifyDraftFormToken(draft.id, "bad-token")).toBeUndefined();
+  });
+
+  it("shows pending attachments from the same chat and user even when they belong to another draft", async () => {
+    const { assets } = createServices();
+    const firstDraft = assets.createDraft({ chatId: "oc_group", userId: "ou_a" });
+    await assets.savePendingAssets({
+      chatId: "oc_group",
+      userId: "ou_a",
+      messageId: "om_a",
+      assets: [inputAsset("file_a", "a.png", "image")]
+    });
+    const secondDraft = assets.createDraft({ chatId: "oc_group", userId: "ou_a" });
+
+    const candidates = assets.getPendingAssetCandidates({ draftId: secondDraft.id });
+
+    expect(firstDraft.id).not.toBe(secondDraft.id);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toEqual(expect.objectContaining({ fileName: "a.png" }));
+  });
+
   it("links selected pending assets to a task and prevents reuse", async () => {
     const { assets, tasks, db } = createServices();
     const workspaceRoot = await mkdtemp(join(tmpdir(), "feishu-assets-"));

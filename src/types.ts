@@ -4,10 +4,16 @@ export type TaskExecutionMode = "plan" | "agent";
 
 export type TaskStatus =
   | "created"
+  | "needs_input"
   | "plan_ready"
+  | "plan_review"
+  | "execution_review"
   | "waiting_approval"
   | "queued"
   | "running"
+  | "included_in_pr"
+  | "delivered"
+  | "pr_created"
   | "succeeded"
   | "failed"
   | "canceled"
@@ -67,6 +73,10 @@ export interface TaskFormInput extends ParsedTaskMessage {
 
 export interface TaskRecord {
   id: string;
+  threadId?: string | null;
+  changesetId?: string | null;
+  currentPlanVersionId?: string | null;
+  deliveryStatus?: "active" | "included_in_changeset" | "included_in_pr" | "delivered" | "canceled" | "failed" | null;
   feishuEventId?: string | null;
   feishuChatId?: string | null;
   feishuMessageId?: string | null;
@@ -102,6 +112,79 @@ export interface TaskRecord {
   finishedAt?: string | null;
 }
 
+export type DeliveryThreadStatus = "active" | "needs_input" | "running" | "pr_created" | "delivered" | "failed" | "canceled";
+
+export interface DeliveryThreadRecord {
+  id: string;
+  source: "feishu";
+  projectName: string;
+  goalSummary: string;
+  feishuChatId?: string | null;
+  feishuUserId?: string | null;
+  status: DeliveryThreadStatus;
+  currentChangesetId?: string | null;
+  currentPullRequestId?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type CodexRunType = "plan" | "revise_plan" | "execute" | "fix" | "summarize";
+export type CodexRunStatus = "succeeded" | "failed";
+
+export interface CodexRunRecord {
+  id: string;
+  taskId: string;
+  threadId?: string | null;
+  runType: CodexRunType;
+  status: CodexRunStatus;
+  promptPath: string;
+  logPath: string;
+  summaryPath?: string | null;
+  handoffPath?: string | null;
+  exitCode?: number | null;
+  summary: string;
+  createdAt: string;
+  startedAt: string;
+  finishedAt: string;
+}
+
+export interface PlanVersionRecord {
+  id: string;
+  taskId: string;
+  threadId?: string | null;
+  version: number;
+  planPath: string;
+  summary: string;
+  status: "draft" | "approved" | "superseded";
+  codexRunId?: string | null;
+  createdAt: string;
+}
+
+export interface ChangesetRecord {
+  id: string;
+  threadId: string;
+  projectName: string;
+  branch?: string | null;
+  commitSha?: string | null;
+  artifactPath?: string | null;
+  testSummary?: string | null;
+  status: "open" | "ready_for_pr" | "pr_created" | "closed";
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PullRequestRecord {
+  id: string;
+  threadId: string;
+  changesetId: string;
+  url: string;
+  branch?: string | null;
+  commitSha?: string | null;
+  status: "draft" | "open" | "merged" | "closed";
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type InputAssetType = "image" | "video" | "file";
 
 export interface InputAsset {
@@ -122,6 +205,7 @@ export interface TaskDraft {
   feishuUserId: string;
   sourceMessageId?: string | null;
   formMessageId?: string | null;
+  formToken: string;
   status: "active" | "submitted" | "expired";
   createdAt: string;
   updatedAt: string;

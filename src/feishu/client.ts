@@ -221,6 +221,12 @@ export class FeishuClient {
     if (Number(json?.code) === 99991672) {
       return [
         `Feishu ${action} failed: 飞书应用缺少消息资源读取权限 (app is missing message resource permission)`,
+        "请在飞书开放平台 -> 权限管理中开通任一权限 [im:message.history:readonly, im:message:readonly, im:message]",
+        "保存后重新发布应用版本，并在企业管理后台/授权页面重新授权该应用，否则 tenant_access_token 仍不包含新权限",
+        `HTTP ${response.status}, code=${json?.code}, msg=${formatLogMessage(json?.msg ?? json?.message)}`
+      ].join("; ");
+      return [
+        `Feishu ${action} failed: 飞书应用缺少消息资源读取权限 (app is missing message resource permission)`,
         "请在飞书开放平台开通任一权限 [im:message.history:readonly, im:message:readonly, im:message] 后重新发布/授权",
         `HTTP ${response.status}, code=${json?.code}, msg=${formatLogMessage(json?.msg ?? json?.message)}`
       ].join("; ");

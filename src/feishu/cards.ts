@@ -124,7 +124,7 @@ export function buildHelpCard(input?: { reason?: string }): object {
 
 export function buildTaskFormCard(
   projects: ProjectConfig[],
-  input?: { reason?: string; values?: Record<string, string>; draftId?: string; assetCandidates?: PendingInputAsset[] }
+  input?: { reason?: string; values?: Record<string, string>; draftId?: string; assetCandidates?: PendingInputAsset[]; formUrl?: string }
 ): object {
   const projectOptions = projects.map((project) => ({
     text: { tag: "plain_text", content: project.name },
@@ -143,7 +143,9 @@ export function buildTaskFormCard(
       title: { tag: "plain_text", content: "填写 Codex 任务表单" },
       template: input?.reason ? "orange" : "blue"
     },
-    elements: [
+    elements: input?.formUrl
+      ? buildTaskFormEntryElements(input.formUrl, assetCandidates, input.reason, input.draftId)
+      : [
       ...(input?.reason
         ? [
             {
@@ -256,15 +258,8 @@ export function buildTaskFormCard(
             name: "selectedAssetIds",
             placeholder: { tag: "plain_text", content: "请选择要关联到本任务的附件" },
             selected_values: selectedAssetIds.filter((id) => assetOptions.some((option) => option.value === id)),
-            options:
-              assetOptions.length > 0
-                ? assetOptions
-                : [
-                    {
-                      text: { tag: "plain_text", content: "暂无可关联附件，请先发送附件后刷新" },
-                      value: "__no_pending_assets__"
-                    }
-                  ]
+            disabled: assetOptions.length === 0,
+            options: assetOptions
           },
           {
             tag: "input",
@@ -279,6 +274,13 @@ export function buildTaskFormCard(
           },
           {
             tag: "button",
+            name: "refreshAssets",
+            action_type: "form_submit",
+            text: { tag: "plain_text", content: "刷新附件列表" },
+            value: { action: "refresh_task_form_assets", draftId: input?.draftId }
+          },
+          {
+            tag: "button",
             name: "submit",
             action_type: "form_submit",
             text: { tag: "plain_text", content: "提交任务" },
@@ -287,20 +289,70 @@ export function buildTaskFormCard(
           }
         ]
       },
+      ...buildAssetPreviewButtonElements(assetCandidates, input?.draftId),
       {
         tag: "action",
         actions: [
-          {
-            tag: "button",
-            text: { tag: "plain_text", content: "刷新附件列表" },
-            value: { action: "refresh_task_form_assets", draftId: input?.draftId }
-          },
           {
             tag: "button",
             text: { tag: "plain_text", content: "查看填写说明" },
             value: { action: "open_help" }
           }
         ]
+      }
+      ]
+  };
+}
+
+function buildTaskFormEntryElements(formUrl: string, assetCandidates: PendingInputAsset[], reason?: string, draftId?: string): object[] {
+  return [
+    ...(reason
+      ? [
+          {
+            tag: "div",
+            text: { tag: "lark_md", content: `**提示**：${reason}` }
+          }
+        ]
+      : []),
+    {
+      tag: "div",
+      text: {
+        tag: "lark_md",
+        content:
+          "请打开移动端任务表单填写信息并选择附件。\n\n" +
+          (assetCandidates.length > 0
+            ? `已检测到 **${assetCandidates.length}** 个可关联附件，表单中可逐项预览图片后勾选。`
+            : "暂未检测到可关联附件。")
+      }
+    },
+    {
+      tag: "action",
+      actions: [
+        {
+          tag: "button",
+          text: { tag: "plain_text", content: "打开任务表单" },
+          type: "primary",
+          url: formUrl
+        }
+      ]
+    }
+  ];
+}
+
+export function buildAssetPreviewCard(asset: PendingInputAsset): object {
+  const title = formatAssetOption(asset);
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: "plain_text", content: title },
+      template: "blue"
+    },
+    elements: [
+      {
+        tag: "img",
+        img_key: asset.feishuFileKey,
+        alt: { tag: "plain_text", content: title },
+        preview: true
       }
     ]
   };
@@ -380,6 +432,41 @@ function formatAssetOption(asset: PendingInputAsset): string {
   const time = Number.isNaN(date.getTime()) ? "" : `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
   const name = asset.fileName.length > 28 ? `${asset.fileName.slice(0, 27)}…` : asset.fileName;
   return `${label} ${time} ${name}`;
+}
+
+function buildAssetPreviewButtonElements(assets: PendingInputAsset[], draftId?: string): object[] {
+  const imageAssets = assets.filter((asset) => asset.assetType === "image");
+  if (imageAssets.length === 0) {
+    return [];
+  }
+
+  const actionBlocks = chunk(imageAssets, 6).map((assetsInRow) => ({
+    tag: "action",
+    actions: assetsInRow.map((asset) => ({
+      tag: "button",
+      text: { tag: "plain_text", content: `预览${asset.label ?? "图片"}` },
+      value: { action: "preview_task_form_asset", draftId, assetId: asset.id }
+    }))
+  }));
+
+  return [
+    {
+      tag: "div",
+      text: {
+        tag: "lark_md",
+        content: "**图片预览**：先点按钮查看，再在附件选择框中勾选对应图片。"
+      }
+    },
+    ...actionBlocks
+  ];
+}
+
+function chunk<T>(values: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+  return chunks;
 }
 
 function countInputAssets(value?: string | null): number {

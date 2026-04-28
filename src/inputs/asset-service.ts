@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import type { FeishuClient } from "../feishu/client.js";
 import type { FeishuMessageEvent } from "../feishu/events.js";
@@ -23,6 +25,7 @@ function rowToDraft(row: Record<string, unknown>): TaskDraft {
     feishuUserId: String(row.feishu_user_id),
     sourceMessageId: row.source_message_id as string | null,
     formMessageId: row.form_message_id as string | null,
+    formToken: String(row.form_token ?? ""),
     status: row.status as TaskDraft["status"],
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
@@ -58,14 +61,15 @@ export class AssetService {
   createDraft(input: { chatId: string; userId: string; sourceMessageId?: string }): TaskDraft {
     this.expireOldDraftsAndAssets();
     const id = `draft-${randomUUID()}`;
+    const formToken = randomUUID().replace(/-/g, "") + randomUUID().replace(/-/g, "");
     const timestamp = now();
     this.db
       .prepare(
         `INSERT INTO task_drafts
-         (id, feishu_chat_id, feishu_user_id, source_message_id, status, created_at, updated_at, expires_at)
-         VALUES (?, ?, ?, ?, 'active', ?, ?, ?)`
+         (id, feishu_chat_id, feishu_user_id, source_message_id, form_token, status, created_at, updated_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)`
       )
-      .run(id, input.chatId, input.userId, input.sourceMessageId ?? null, timestamp, timestamp, expiresAt());
+      .run(id, input.chatId, input.userId, input.sourceMessageId ?? null, formToken, timestamp, timestamp, expiresAt());
     return this.getDraft(id);
   }
 
@@ -96,6 +100,17 @@ export class AssetService {
 
   markDraftSubmitted(draftId: string): void {
     this.db.prepare("UPDATE task_drafts SET status = 'submitted', updated_at = ? WHERE id = ?").run(now(), draftId);
+  }
+
+  verifyDraftFormToken(draftId: string, token?: string): TaskDraft | undefined {
+    if (!token) {
+      return undefined;
+    }
+    this.expireOldDraftsAndAssets();
+    const row = this.db
+      .prepare("SELECT * FROM task_drafts WHERE id = ? AND form_token = ? AND status = 'active' AND expires_at > ?")
+      .get(draftId, token, now()) as Record<string, unknown> | undefined;
+    return row ? rowToDraft(row) : undefined;
   }
 
   async savePendingAssets(input: {
@@ -163,11 +178,10 @@ export class AssetService {
            AND feishu_user_id = ?
            AND status = 'pending'
            AND created_at >= ?
-           AND (? IS NULL OR draft_id IS NULL OR draft_id = ?)
          ORDER BY created_at ASC
          LIMIT ?`
       )
-      .all(chatId, userId, new Date(Date.now() - pendingAssetTtlMs).toISOString(), draft?.id ?? null, draft?.id ?? null, input.limit ?? defaultCandidateLimit) as Array<
+      .all(chatId, userId, new Date(Date.now() - pendingAssetTtlMs).toISOString(), input.limit ?? defaultCandidateLimit) as Array<
       Record<string, unknown>
     >;
 
@@ -186,6 +200,29 @@ export class AssetService {
       throw new Error("选择的附件已过期、已被其他任务关联，或不属于当前会话/提交人，请刷新附件列表后重试。");
     }
     return selected;
+  }
+
+  getPendingAssetForDraft(input: { draftId: string; assetId: string }): PendingInputAsset | undefined {
+    const draft = this.getDraft(input.draftId);
+    return this.getPendingAssetCandidates({ draftId: draft.id }).find((asset) => asset.id === input.assetId);
+  }
+
+  async readPendingAssetPreview(asset: PendingInputAsset): Promise<{ body: Buffer; contentType: string }> {
+    if (asset.assetType !== "image" && asset.assetType !== "video") {
+      throw new Error("Only image and video attachments can be previewed");
+    }
+    const tempDir = await mkdtemp(join(tmpdir(), "feishu-preview-"));
+    const filePath = join(tempDir, safeFileName(asset.fileName || asset.id));
+    try {
+      await this.downloadAsset(asset, filePath, asset.feishuMessageId ?? undefined);
+      const body = await readFile(filePath);
+      return {
+        body,
+        contentType: asset.mimeType || (asset.assetType === "video" ? "video/mp4" : "image/jpeg")
+      };
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
   }
 
   async saveAssets(taskId: string, workspaceRoot: string, assets: FeishuMessageEvent["assets"], sourceMessageId?: string): Promise<InputAsset[]> {

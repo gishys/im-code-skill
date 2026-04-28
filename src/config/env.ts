@@ -7,6 +7,7 @@ const envSchema = z.object({
   DATABASE_PATH: z.string().default("./data/orchestrator.sqlite"),
   PROJECTS_CONFIG_PATH: z.string().default("./projects.yaml"),
   WORKSPACE_ROOT: z.string().default("./workspaces"),
+  REPO_CACHE_ROOT: z.string().default("./repo-cache"),
   LOG_ROOT: z.string().default("./logs"),
   WORKER_ENABLED: z.coerce.boolean().default(true),
   WORKER_ID: z.string().default("local-worker"),
@@ -29,7 +30,9 @@ const envSchema = z.object({
   GITHUB_TOKEN: z.string().optional(),
   GITHUB_OWNER: z.string().optional(),
   CODEX_COMMAND: z.string().default("codex"),
-  CODEX_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(1800)
+  CODEX_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(1800),
+  CODEX_HISTORY_ENABLED: z.coerce.boolean().default(true),
+  CODEX_CONTEXT_MAX_CHARS: z.coerce.number().int().positive().default(24000)
 });
 
 export type AppEnv = z.infer<typeof envSchema>;

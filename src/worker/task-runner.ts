@@ -7,7 +7,7 @@ import type { FeishuClient } from "../feishu/client.js";
 import { buildTaskCard } from "../feishu/cards.js";
 import { packageArtifacts } from "../artifact/packager.js";
 import { runCodex, runCodexPlan } from "../codex/runner.js";
-import { buildTaskBranch, cloneRepo, commitAll, createBranch, pushBranch } from "../github/git.js";
+import { buildTaskBranch, commitAll, prepareCachedRepoWorktree, pushBranch } from "../github/git.js";
 import { createPullRequest, parseGitHubRepoName } from "../github/pull-request.js";
 import { runProjectChecks } from "../testing/runner.js";
 import { TaskService } from "../task/service.js";
@@ -47,17 +47,64 @@ export class TaskRunner {
 
       this.tasks.updateStage(task.id, "cloning", "Cloning repositories for planning");
       for (const repo of repoWorks) {
-        await cloneRepo(repo.config.repo, project.default_branch, repo.dir);
+        await prepareCachedRepoWorktree({
+          repo: repo.config.repo,
+          branch: project.default_branch,
+          destination: repo.dir,
+          cacheRoot: this.env.REPO_CACHE_ROOT
+        });
       }
 
       this.tasks.updateStage(task.id, "planning", "Generating implementation plan");
       await this.progress(this.tasks.getTask(task.id), "Codex is generating a plan");
       const result = await runCodexPlan(this.env, this.tasks.getTask(task.id), repoWorks.map((item) => item.dir), workspace);
+      const currentTask = this.tasks.getTask(task.id);
+      this.tasks.addCodexRun({
+        id: result.runId,
+        taskId: task.id,
+        threadId: currentTask.threadId,
+        runType: result.runType,
+        status: result.exitCode === 0 ? "succeeded" : "failed",
+        promptPath: result.promptPath,
+        logPath: result.logPath,
+        summaryPath: result.summaryPath,
+        handoffPath: result.handoffPath,
+        exitCode: result.exitCode,
+        summary: result.summary,
+        startedAt: result.startedAt,
+        finishedAt: result.finishedAt
+      });
+      this.tasks.addContextSnapshot({
+        taskId: task.id,
+        threadId: currentTask.threadId,
+        codexRunId: result.runId,
+        snapshotPath: result.summaryPath,
+        summary: result.summary,
+        tokenBudgetChars: this.env.CODEX_CONTEXT_MAX_CHARS
+      });
+      if (result.exitCode !== 0) {
+        throw new Error(`Codex plan failed with exit code ${result.exitCode}`);
+      }
       await assertReposClean(repoWorks);
+      const planVersion = this.tasks.addPlanVersion({
+        taskId: task.id,
+        threadId: currentTask.threadId,
+        planPath: result.planPath,
+        summary: result.summary,
+        codexRunId: result.runId
+      });
 
       this.tasks.markPlanReady(task.id, {
         planSummary: result.summary,
         planArtifactPath: result.planPath
+      });
+      this.tasks.addTaskMessage({
+        threadId: currentTask.threadId,
+        taskId: task.id,
+        role: "system",
+        messageType: "plan_version_created",
+        content: `Plan version ${planVersion.version} is ready.`,
+        metadata: { planVersionId: planVersion.id }
       });
       await this.progress(this.tasks.getTask(task.id), "Plan is ready");
     } catch (error) {
@@ -80,13 +127,45 @@ export class TaskRunner {
 
       this.tasks.updateStage(task.id, "cloning", "Cloning repositories");
       for (const repo of repoWorks) {
-        await cloneRepo(repo.config.repo, project.default_branch, repo.dir);
-        await createBranch(repo.dir, branch);
+        await prepareCachedRepoWorktree({
+          repo: repo.config.repo,
+          branch: project.default_branch,
+          destination: repo.dir,
+          cacheRoot: this.env.REPO_CACHE_ROOT,
+          worktreeBranch: branch
+        });
       }
 
       this.tasks.updateStage(task.id, "codex_running", "Running Codex");
       await this.progress(this.tasks.getTask(task.id), "Codex is editing code");
-      await runCodex(this.env, this.tasks.getTask(task.id), repoWorks.map((item) => item.dir), workspace);
+      const codexResult = await runCodex(this.env, this.tasks.getTask(task.id), repoWorks.map((item) => item.dir), workspace);
+      const currentTask = this.tasks.getTask(task.id);
+      this.tasks.addCodexRun({
+        id: codexResult.runId,
+        taskId: task.id,
+        threadId: currentTask.threadId,
+        runType: codexResult.runType,
+        status: codexResult.exitCode === 0 ? "succeeded" : "failed",
+        promptPath: codexResult.promptPath,
+        logPath: codexResult.logPath,
+        summaryPath: codexResult.summaryPath,
+        handoffPath: codexResult.handoffPath,
+        exitCode: codexResult.exitCode,
+        summary: codexResult.summary,
+        startedAt: codexResult.startedAt,
+        finishedAt: codexResult.finishedAt
+      });
+      this.tasks.addContextSnapshot({
+        taskId: task.id,
+        threadId: currentTask.threadId,
+        codexRunId: codexResult.runId,
+        snapshotPath: codexResult.summaryPath,
+        summary: codexResult.summary,
+        tokenBudgetChars: this.env.CODEX_CONTEXT_MAX_CHARS
+      });
+      if (codexResult.exitCode !== 0) {
+        throw new Error(`Codex failed with exit code ${codexResult.exitCode}`);
+      }
 
       this.tasks.updateStage(task.id, "testing", "Running tests");
       for (const repo of repoWorks) {
@@ -115,6 +194,15 @@ export class TaskRunner {
           continue;
         }
         commitSha ??= sha;
+        this.tasks.createOrUpdateChangeset({
+          threadId: this.tasks.getTask(task.id).threadId ?? task.id,
+          taskId: task.id,
+          projectName: task.projectName,
+          branch,
+          commitSha: sha,
+          artifactPath: artifact.path,
+          testSummary: "Configured checks passed"
+        });
         await pushBranch(repo.dir, branch);
         const owner = this.env.GITHUB_OWNER;
         if (owner) {
@@ -128,7 +216,20 @@ export class TaskRunner {
             base: project.default_branch,
             draft: true
           });
-          if (prUrl) prUrls.push(prUrl);
+          if (prUrl) {
+            prUrls.push(prUrl);
+            const latestTask = this.tasks.getTask(task.id);
+            const changeset = latestTask.changesetId ? this.tasks.getChangeset(latestTask.changesetId) : undefined;
+            if (latestTask.threadId && changeset) {
+              this.tasks.recordPullRequest({
+                threadId: latestTask.threadId,
+                changesetId: changeset.id,
+                url: prUrl,
+                branch,
+                commitSha: sha
+              });
+            }
+          }
         }
       }
 

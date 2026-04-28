@@ -122,6 +122,14 @@ polling 模式下，飞书按钮回调无法直接进入内网服务，因此支
 - `POST /feishu/actions`
 - `GET /tasks/:id`
 
+## Repository Cache
+
+Tasks use a shared local cache under `REPO_CACHE_ROOT` and an isolated task
+worktree under `WORKSPACE_ROOT/<task-id>`. Before each task starts, the worker
+fetches the configured default branch into the cache, then creates a fresh
+worktree from `origin/<default_branch>`. Plan-only tasks use a detached worktree;
+agent tasks use the task branch, such as `codex/task-...`.
+
 ## Verification
 
 ```bash

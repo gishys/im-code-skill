@@ -4,6 +4,10 @@ PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
+  thread_id TEXT REFERENCES delivery_threads(id) ON DELETE SET NULL,
+  changeset_id TEXT REFERENCES changesets(id) ON DELETE SET NULL,
+  current_plan_version_id TEXT,
+  delivery_status TEXT NOT NULL DEFAULT 'active',
   feishu_event_id TEXT UNIQUE,
   feishu_chat_id TEXT,
   feishu_message_id TEXT,
@@ -41,6 +45,115 @@ CREATE TABLE IF NOT EXISTS tasks (
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_lock ON tasks(status, locked_at);
+CREATE INDEX IF NOT EXISTS idx_tasks_thread ON tasks(thread_id);
+
+CREATE TABLE IF NOT EXISTS delivery_threads (
+  id TEXT PRIMARY KEY,
+  source TEXT NOT NULL DEFAULT 'feishu',
+  project_name TEXT NOT NULL,
+  goal_summary TEXT NOT NULL,
+  feishu_chat_id TEXT,
+  feishu_user_id TEXT,
+  status TEXT NOT NULL,
+  current_changeset_id TEXT,
+  current_pull_request_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_delivery_threads_status ON delivery_threads(status);
+
+CREATE TABLE IF NOT EXISTS task_messages (
+  id TEXT PRIMARY KEY,
+  thread_id TEXT REFERENCES delivery_threads(id) ON DELETE CASCADE,
+  task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+  role TEXT NOT NULL,
+  message_type TEXT NOT NULL,
+  content TEXT NOT NULL,
+  metadata_json TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_messages_thread ON task_messages(thread_id, created_at);
+
+CREATE TABLE IF NOT EXISTS codex_runs (
+  id TEXT PRIMARY KEY,
+  thread_id TEXT REFERENCES delivery_threads(id) ON DELETE SET NULL,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  run_type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  prompt_path TEXT NOT NULL,
+  log_path TEXT NOT NULL,
+  summary_path TEXT,
+  handoff_path TEXT,
+  exit_code INTEGER,
+  summary TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  finished_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_codex_runs_task ON codex_runs(task_id, created_at);
+
+CREATE TABLE IF NOT EXISTS plan_versions (
+  id TEXT PRIMARY KEY,
+  thread_id TEXT REFERENCES delivery_threads(id) ON DELETE CASCADE,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  plan_path TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  status TEXT NOT NULL,
+  codex_run_id TEXT REFERENCES codex_runs(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(task_id, version)
+);
+
+CREATE TABLE IF NOT EXISTS task_context_snapshots (
+  id TEXT PRIMARY KEY,
+  thread_id TEXT REFERENCES delivery_threads(id) ON DELETE CASCADE,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  codex_run_id TEXT REFERENCES codex_runs(id) ON DELETE SET NULL,
+  snapshot_path TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  token_budget_chars INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_context_snapshots_task ON task_context_snapshots(task_id, created_at);
+
+CREATE TABLE IF NOT EXISTS changesets (
+  id TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL REFERENCES delivery_threads(id) ON DELETE CASCADE,
+  project_name TEXT NOT NULL,
+  branch TEXT,
+  commit_sha TEXT,
+  artifact_path TEXT,
+  test_summary TEXT,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_changesets_thread ON changesets(thread_id, status);
+
+CREATE TABLE IF NOT EXISTS changeset_tasks (
+  changeset_id TEXT NOT NULL REFERENCES changesets(id) ON DELETE CASCADE,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (changeset_id, task_id)
+);
+
+CREATE TABLE IF NOT EXISTS pull_requests (
+  id TEXT PRIMARY KEY,
+  thread_id TEXT NOT NULL REFERENCES delivery_threads(id) ON DELETE CASCADE,
+  changeset_id TEXT NOT NULL REFERENCES changesets(id) ON DELETE CASCADE,
+  url TEXT NOT NULL,
+  branch TEXT,
+  commit_sha TEXT,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS task_events (
   id TEXT PRIMARY KEY,
@@ -100,6 +213,7 @@ CREATE TABLE IF NOT EXISTS task_drafts (
   feishu_user_id TEXT NOT NULL,
   source_message_id TEXT,
   form_message_id TEXT,
+  form_token TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
