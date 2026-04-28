@@ -359,6 +359,27 @@ export function buildAssetPreviewCard(asset: PendingInputAsset): object {
 }
 
 function taskActions(task: TaskRecord): object[] {
+  if (task.status === "execution_review" || task.status === "needs_input") {
+    return [
+      {
+        tag: "button",
+        text: { tag: "plain_text", content: "Continue" },
+        type: "primary",
+        value: { action: "continue_task", taskId: task.id }
+      },
+      {
+        tag: "button",
+        text: { tag: "plain_text", content: "History" },
+        value: { action: "view_history", taskId: task.id }
+      },
+      {
+        tag: "button",
+        text: { tag: "plain_text", content: "Cancel" },
+        type: "danger",
+        value: { action: "cancel", taskId: task.id }
+      }
+    ];
+  }
   if (task.executionMode === "plan" && task.status === "plan_ready") {
     return [
       {
