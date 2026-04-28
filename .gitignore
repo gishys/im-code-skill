@@ -5,5 +5,5 @@ projects.yaml
 data/
 logs/
 workspaces/
-repo-cache/
 *.log
+
