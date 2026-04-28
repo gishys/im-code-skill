@@ -5,10 +5,66 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { runCodexPlan } from "../src/codex/runner.js";
 import { loadEnv } from "../src/config/env.js";
+import { DbClient } from "../src/db/client.js";
 import { schemaSql } from "../src/db/schema.js";
 import { TaskService } from "../src/task/service.js";
 
 describe("delivery thread model", () => {
+  it("migrates legacy task tables before creating thread indexes", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "codex-db-"));
+    const dbPath = join(workspace, "legacy.sqlite");
+    try {
+      const legacy = new DatabaseSync(dbPath);
+      legacy.exec(`
+        CREATE TABLE tasks (
+          id TEXT PRIMARY KEY,
+          feishu_event_id TEXT UNIQUE,
+          feishu_chat_id TEXT,
+          feishu_message_id TEXT,
+          feishu_user_id TEXT,
+          project_name TEXT NOT NULL,
+          task_type TEXT NOT NULL,
+          scope TEXT NOT NULL,
+          raw_text TEXT NOT NULL,
+          parsed_description TEXT NOT NULL,
+          status TEXT NOT NULL,
+          approval_status TEXT NOT NULL,
+          auto_approved INTEGER NOT NULL DEFAULT 0,
+          current_stage TEXT NOT NULL,
+          failure_stage TEXT,
+          failure_summary TEXT,
+          workspace_path TEXT,
+          artifact_path TEXT,
+          artifact_file_key TEXT,
+          input_assets_json TEXT,
+          stream_message_id TEXT,
+          github_pr_url TEXT,
+          github_branch TEXT,
+          github_commit_sha TEXT,
+          locked_by TEXT,
+          locked_at TEXT,
+          heartbeat_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          started_at TEXT,
+          finished_at TEXT
+        );
+      `);
+      legacy.close();
+
+      const client = new DbClient(dbPath);
+      try {
+        const columns = new Set((client.db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>).map((column) => column.name));
+        expect(columns.has("thread_id")).toBe(true);
+        expect(client.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_tasks_thread'").get()).toBeTruthy();
+      } finally {
+        client.close();
+      }
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
   it("creates a delivery thread with the first task", () => {
     const db = new DatabaseSync(":memory:");
     db.exec(schemaSql);
@@ -120,6 +176,7 @@ describe("delivery thread model", () => {
         CODEX_CONTEXT_MAX_CHARS: "900",
         CODEX_TIMEOUT_SECONDS: "10"
       });
+      const progressChunks: string[] = [];
       const result = await runCodexPlan(
         env,
         {
@@ -163,12 +220,18 @@ describe("delivery thread model", () => {
           finishedAt: null
         },
         [workspace],
-        workspace
+        workspace,
+        {
+          onProgress: (update) => {
+            progressChunks.push(update.chunk);
+          }
+        }
       );
 
       expect(result.runId).toEqual(expect.stringMatching(/^run-/));
       expect(await readFile(result.promptPath, "utf8")).toContain("context compacted");
       expect(await readFile(result.logPath, "utf8")).toContain("You are planning");
+      expect(progressChunks.join("")).toContain("You are planning");
     } finally {
       await rm(workspace, { recursive: true, force: true });
     }

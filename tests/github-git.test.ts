@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execa } from "execa";
-import { prepareCachedRepoWorktree } from "../src/github/git.js";
+import { normalizeRepoUrl, prepareCachedRepoWorktree } from "../src/github/git.js";
 
 vi.mock("execa", () => ({
   execa: vi.fn()
@@ -63,5 +63,79 @@ describe("prepareCachedRepoWorktree", () => {
       ["worktree", "add", "--detach", join(tempRoot, "workspaces", "task-1", "frontend"), "origin/main"],
       { cwd: cacheDir, all: true }
     );
+  });
+
+  it("strips encoded quote characters from configured repository URLs", async () => {
+    await prepareCachedRepoWorktree({
+      repo: " https://github.com/example/demo-frontend.git%22 ",
+      branch: "main",
+      cacheRoot: join(tempRoot, "repo-cache"),
+      destination: join(tempRoot, "workspaces", "task-1", "frontend")
+    });
+
+    const calls = execaMock.mock.calls as unknown as Array<[string, string[], Record<string, unknown>?]>;
+    const cloneCall = calls.find((call) => call[1][0] === "clone");
+    expect(cloneCall?.[1][2]).toBe("https://github.com/example/demo-frontend.git");
+  });
+
+  it("uses an existing cache for plan worktrees when fetch cannot reach GitHub", async () => {
+    const cacheRoot = join(tempRoot, "repo-cache");
+    const cacheDir = join(cacheRoot, "github.com-example-demo-frontend-23730ded93fa2663");
+    await mkdir(cacheDir, { recursive: true });
+    execaMock.mockImplementation((async (_command: unknown, args: unknown) => {
+      if (Array.isArray(args) && args[0] === "fetch") {
+        const error = new Error("fetch failed") as Error & { all: string };
+        error.all = "fatal: unable to access 'https://github.com/example/demo-frontend.git/': Failed to connect to github.com port 443: Couldn't connect to server";
+        throw error;
+      }
+      return { exitCode: 0, stdout: "", all: "" } as never;
+    }) as never);
+
+    await expect(
+      prepareCachedRepoWorktree({
+        repo: "git@github.com:example/demo-frontend.git",
+        branch: "main",
+        cacheRoot,
+        destination: join(tempRoot, "workspaces", "task-1", "frontend"),
+        allowStaleCacheOnFetchFailure: true
+      })
+    ).resolves.toBeUndefined();
+
+    expect(execaMock).toHaveBeenCalledWith(
+      "git",
+      ["worktree", "add", "--detach", join(tempRoot, "workspaces", "task-1", "frontend"), "origin/main"],
+      { cwd: cacheDir, all: true }
+    );
+  });
+
+  it("reports a readable network error when no cache exists", async () => {
+    execaMock.mockImplementation((async (_command: unknown, args: unknown) => {
+      if (Array.isArray(args) && args[0] === "clone") {
+        const error = new Error("clone failed") as Error & { all: string };
+        error.all = "fatal: unable to access 'https://github.com/example/demo-frontend.git/': Failed to connect to github.com port 443: Couldn't connect to server";
+        throw error;
+      }
+      return { exitCode: 0, stdout: "", all: "" } as never;
+    }) as never);
+
+    await expect(
+      prepareCachedRepoWorktree({
+        repo: "https://github.com/example/demo-frontend.git",
+        branch: "main",
+        cacheRoot: join(tempRoot, "repo-cache"),
+        destination: join(tempRoot, "workspaces", "task-1", "frontend"),
+        allowStaleCacheOnFetchFailure: true
+      })
+    ).rejects.toThrow("无法连接 GitHub");
+  });
+});
+
+describe("normalizeRepoUrl", () => {
+  it("removes surrounding raw and URL-encoded quotes", () => {
+    expect(normalizeRepoUrl('"https://github.com/example/demo.git%22')).toBe("https://github.com/example/demo.git");
+  });
+
+  it("rejects repository URLs with whitespace inside them", () => {
+    expect(() => normalizeRepoUrl("https://github.com/example/demo.git bad")).toThrow("仓库地址包含空白字符");
   });
 });

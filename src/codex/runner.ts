@@ -18,7 +18,16 @@ export interface CodexRunResult {
   finishedAt: string;
 }
 
-export async function runCodex(env: AppEnv, task: TaskRecord, repoDirs: string[], workspace: string): Promise<CodexRunResult> {
+export interface CodexProgressUpdate {
+  chunk: string;
+  output: string;
+}
+
+export interface CodexRunOptions {
+  onProgress?: (update: CodexProgressUpdate) => void | Promise<void>;
+}
+
+export async function runCodex(env: AppEnv, task: TaskRecord, repoDirs: string[], workspace: string, options: CodexRunOptions = {}): Promise<CodexRunResult> {
   const paths = await prepareRunWorkspace(workspace, "execute");
   const promptPath = paths.promptPath;
   const logPath = paths.logPath;
@@ -27,12 +36,7 @@ export async function runCodex(env: AppEnv, task: TaskRecord, repoDirs: string[]
   await writeFile(promptPath, prompt, "utf8");
 
   const startedAt = new Date().toISOString();
-  const result = await execa(env.CODEX_COMMAND, ["exec", "--", prompt], {
-    cwd: workspace,
-    all: true,
-    timeout: env.CODEX_TIMEOUT_SECONDS * 1000,
-    reject: false
-  });
+  const result = await runCodexCommand(env, workspace, prompt, options);
   const finishedAt = new Date().toISOString();
   const output = redactSecrets(result.all ?? "");
   const summary = tail(output, 1200);
@@ -53,7 +57,7 @@ export async function runCodex(env: AppEnv, task: TaskRecord, repoDirs: string[]
   };
 }
 
-export async function runCodexPlan(env: AppEnv, task: TaskRecord, repoDirs: string[], workspace: string): Promise<CodexRunResult & { planPath: string }> {
+export async function runCodexPlan(env: AppEnv, task: TaskRecord, repoDirs: string[], workspace: string, options: CodexRunOptions = {}): Promise<CodexRunResult & { planPath: string }> {
   const paths = await prepareRunWorkspace(workspace, "plan");
   const promptPath = paths.promptPath;
   const logPath = paths.logPath;
@@ -63,12 +67,7 @@ export async function runCodexPlan(env: AppEnv, task: TaskRecord, repoDirs: stri
   await writeFile(promptPath, prompt, "utf8");
 
   const startedAt = new Date().toISOString();
-  const result = await execa(env.CODEX_COMMAND, ["exec", "--", prompt], {
-    cwd: workspace,
-    all: true,
-    timeout: env.CODEX_TIMEOUT_SECONDS * 1000,
-    reject: false
-  });
+  const result = await runCodexCommand(env, workspace, prompt, options);
   const finishedAt = new Date().toISOString();
   const output = redactSecrets(result.all ?? "");
   const summary = tail(output, 2000);
@@ -88,6 +87,40 @@ export async function runCodexPlan(env: AppEnv, task: TaskRecord, repoDirs: stri
     summary,
     startedAt,
     finishedAt
+  };
+}
+
+async function runCodexCommand(env: AppEnv, workspace: string, prompt: string, options: CodexRunOptions): Promise<{ all?: string; exitCode?: number | null }> {
+  let output = "";
+  let progressQueue = Promise.resolve();
+  const child = execa(env.CODEX_COMMAND, ["exec", "--", prompt], {
+    cwd: workspace,
+    all: true,
+    timeout: env.CODEX_TIMEOUT_SECONDS * 1000,
+    reject: false
+  });
+
+  child.all?.on("data", (data: Buffer | string) => {
+    const chunk = redactSecrets(data.toString());
+    output += chunk;
+    const streamedOutput = tail(output, 4000);
+    progressQueue = progressQueue
+      .then(() =>
+        options.onProgress?.({
+          chunk,
+          output: streamedOutput
+        })
+      )
+      .catch(() => {
+        // Progress callbacks are best-effort; the Codex run should continue even if card updates fail.
+      });
+  });
+
+  const result = await child;
+  await progressQueue;
+  return {
+    ...result,
+    all: output || result.all
   };
 }
 

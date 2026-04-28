@@ -11,7 +11,8 @@ export interface GitRepoResult {
 const cacheLocks = new Map<string, Promise<void>>();
 
 export async function cloneRepo(repo: string, branch: string, destination: string): Promise<void> {
-  await execa("git", ["clone", "--depth", "1", "--branch", branch, repo, destination], { all: true });
+  const normalizedRepo = normalizeRepoUrl(repo);
+  await runGit(["clone", "--depth", "1", "--branch", branch, normalizedRepo, destination]);
 }
 
 export async function prepareCachedRepoWorktree(options: {
@@ -20,10 +21,12 @@ export async function prepareCachedRepoWorktree(options: {
   destination: string;
   cacheRoot: string;
   worktreeBranch?: string;
+  allowStaleCacheOnFetchFailure?: boolean;
 }): Promise<void> {
-  const cacheDir = repoCacheDir(options.cacheRoot, options.repo);
+  const repo = normalizeRepoUrl(options.repo);
+  const cacheDir = repoCacheDir(options.cacheRoot, repo);
   await withCacheLock(cacheDir, async () => {
-    await ensureRepoCache(options.repo, options.branch, cacheDir);
+    await ensureRepoCache(repo, options.branch, cacheDir, options.allowStaleCacheOnFetchFailure ?? false);
   });
 
   await mkdir(dirname(options.destination), { recursive: true });
@@ -31,16 +34,23 @@ export async function prepareCachedRepoWorktree(options: {
   const args = options.worktreeBranch
     ? ["worktree", "add", "-B", options.worktreeBranch, options.destination, target]
     : ["worktree", "add", "--detach", options.destination, target];
-  await execa("git", args, { cwd: cacheDir, all: true });
+  await runGit(args, { cwd: cacheDir });
 }
 
-async function ensureRepoCache(repo: string, branch: string, cacheDir: string): Promise<void> {
+async function ensureRepoCache(repo: string, branch: string, cacheDir: string, allowStaleCacheOnFetchFailure: boolean): Promise<void> {
   await mkdir(dirname(cacheDir), { recursive: true });
   const exists = await isGitRepository(cacheDir);
   if (!exists) {
-    await execa("git", ["clone", "--no-checkout", repo, cacheDir], { all: true });
+    await runGit(["clone", "--no-checkout", repo, cacheDir]);
   }
-  await execa("git", ["fetch", "origin", branch, "--prune"], { cwd: cacheDir, all: true });
+  try {
+    await runGit(["fetch", "origin", branch, "--prune"], { cwd: cacheDir });
+  } catch (error) {
+    if (exists && allowStaleCacheOnFetchFailure) {
+      return;
+    }
+    throw error;
+  }
 }
 
 async function isGitRepository(dir: string): Promise<boolean> {
@@ -81,6 +91,56 @@ function repoCacheDir(cacheRoot: string, repo: string): string {
     .replace(/^-+|-+$/g, "")
     .slice(0, 80);
   return join(cacheRoot, `${label || "repo"}-${hash}`);
+}
+
+export function normalizeRepoUrl(repo: string): string {
+  let normalized = repo.trim();
+  normalized = normalized.replace(/^(["'`]|%22|%27)+/i, "").replace(/(["'`]|%22|%27)+$/i, "");
+  normalized = normalized.trim();
+  if (!normalized) {
+    throw new Error("仓库地址为空，请检查项目配置。");
+  }
+  if (/\s/.test(normalized)) {
+    throw new Error(`仓库地址包含空白字符，请检查项目配置：${normalized}`);
+  }
+  return normalized;
+}
+
+async function runGit(args: string[], options: { cwd?: string } = {}): Promise<void> {
+  try {
+    await execa("git", args, { ...options, all: true });
+  } catch (error) {
+    throw buildGitError(args, error);
+  }
+}
+
+function buildGitError(args: string[], error: unknown): Error {
+  const output = extractGitOutput(error);
+  const message = output.toLowerCase();
+  const command = `git ${args.join(" ")}`;
+  const repo = args.find((arg) => /^https?:\/\//.test(arg) || /^git@/.test(arg));
+
+  if (message.includes("couldn't connect to server") || message.includes("failed to connect") || message.includes("timed out")) {
+    return new Error(`无法连接 GitHub，仓库准备失败。请检查网络、代理或改用可访问的 SSH/HTTPS 地址。\n命令：${command}\n仓库：${repo ?? "unknown"}`);
+  }
+  if (message.includes("authentication failed") || message.includes("permission denied")) {
+    return new Error(`Git 仓库鉴权失败。请检查 GitHub Token、SSH key 或仓库权限。\n命令：${command}\n仓库：${repo ?? "unknown"}`);
+  }
+  if (message.includes("repository not found") || message.includes("not found")) {
+    return new Error(`Git 仓库不存在或当前凭据无权访问。请检查项目配置中的仓库地址。\n命令：${command}\n仓库：${repo ?? "unknown"}`);
+  }
+  if (message.includes("%22") || message.includes("\"")) {
+    return new Error(`Git 仓库地址疑似包含多余引号，请检查项目配置。\n命令：${command}\n仓库：${repo ?? "unknown"}`);
+  }
+  return new Error(`Git 命令执行失败。\n命令：${command}\n${output}`);
+}
+
+function extractGitOutput(error: unknown): string {
+  if (!error || typeof error !== "object") {
+    return String(error);
+  }
+  const record = error as Record<string, unknown>;
+  return [record.all, record.stderr, record.stdout, record.shortMessage, record.message].filter((value) => typeof value === "string" && value.length > 0).join("\n");
 }
 
 export async function createBranch(repoDir: string, branch: string): Promise<void> {

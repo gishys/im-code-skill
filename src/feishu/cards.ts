@@ -75,7 +75,7 @@ export function buildTaskCard(task: TaskRecord, extra?: { logExcerpt?: string })
       },
       {
         tag: "action",
-        actions: taskActions(task)
+        actions: taskActionsForStatus(task)
       }
     ]
   };
@@ -426,6 +426,68 @@ function taskActions(task: TaskRecord): object[] {
       value: { action: "retry", taskId: task.id }
     }
   ];
+}
+
+function taskActionsForStatus(task: TaskRecord): object[] {
+  if (task.status === "execution_review" || task.status === "needs_input") {
+    return [
+      primaryButton("continue_task", task.id, "继续处理"),
+      plainButton("view_history", task.id, "查看历史"),
+      dangerButton("cancel", task.id, "取消任务")
+    ];
+  }
+
+  if (task.executionMode === "plan" && task.status === "plan_ready") {
+    return [
+      primaryButton("approve_plan_as_agent", task.id, "转为 Agent 执行"),
+      dangerButton("cancel", task.id, "取消任务"),
+      statusButton(task.id)
+    ];
+  }
+
+  if (task.status === "waiting_approval") {
+    return [
+      primaryButton("approve", task.id, "确认执行"),
+      dangerButton("cancel", task.id, "取消任务"),
+      statusButton(task.id)
+    ];
+  }
+
+  if (task.status === "created" || task.status === "queued") {
+    return [dangerButton("cancel", task.id, "取消任务"), statusButton(task.id)];
+  }
+
+  return [statusButton(task.id)];
+}
+
+function primaryButton(action: string, taskId: string, content: string): object {
+  return {
+    tag: "button",
+    text: { tag: "plain_text", content },
+    type: "primary",
+    value: { action, taskId }
+  };
+}
+
+function dangerButton(action: string, taskId: string, content: string): object {
+  return {
+    tag: "button",
+    text: { tag: "plain_text", content },
+    type: "danger",
+    value: { action, taskId }
+  };
+}
+
+function plainButton(action: string, taskId: string, content: string): object {
+  return {
+    tag: "button",
+    text: { tag: "plain_text", content },
+    value: { action, taskId }
+  };
+}
+
+function statusButton(taskId: string): object {
+  return plainButton("status", taskId, "查看状态");
 }
 
 function initialIndex(options: Array<{ value: string }>, value?: string): number | undefined {

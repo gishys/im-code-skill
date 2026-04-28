@@ -20,6 +20,9 @@ interface RepoWork {
 }
 
 export class TaskRunner {
+  private readonly progressTails = new Map<string, string>();
+  private readonly lastProgressAt = new Map<string, number>();
+
   constructor(
     private readonly env: AppEnv,
     private readonly projects: ProjectConfig[],
@@ -51,13 +54,16 @@ export class TaskRunner {
           repo: repo.config.repo,
           branch: project.default_branch,
           destination: repo.dir,
-          cacheRoot: this.env.REPO_CACHE_ROOT
+          cacheRoot: this.env.REPO_CACHE_ROOT,
+          allowStaleCacheOnFetchFailure: true
         });
       }
 
       this.tasks.updateStage(task.id, "planning", "Generating implementation plan");
       await this.progress(this.tasks.getTask(task.id), "Codex is generating a plan");
-      const result = await runCodexPlan(this.env, this.tasks.getTask(task.id), repoWorks.map((item) => item.dir), workspace);
+      const result = await runCodexPlan(this.env, this.tasks.getTask(task.id), repoWorks.map((item) => item.dir), workspace, {
+        onProgress: (update) => this.progress(this.tasks.getTask(task.id), update.chunk)
+      });
       const currentTask = this.tasks.getTask(task.id);
       this.tasks.addCodexRun({
         id: result.runId,
@@ -106,11 +112,11 @@ export class TaskRunner {
         content: `Plan version ${planVersion.version} is ready.`,
         metadata: { planVersionId: planVersion.id }
       });
-      await this.progress(this.tasks.getTask(task.id), "Plan is ready");
+      await this.progress(this.tasks.getTask(task.id), result.summary || "Plan is ready", { force: true, replace: true });
     } catch (error) {
       const summary = error instanceof Error ? error.message : String(error);
       this.tasks.markFailed(task.id, this.tasks.getTask(task.id).currentStage, summary);
-      await this.progress(this.tasks.getTask(task.id), summary);
+      await this.progress(this.tasks.getTask(task.id), summary, { force: true });
     }
   }
 
@@ -138,7 +144,9 @@ export class TaskRunner {
 
       this.tasks.updateStage(task.id, "codex_running", "Running Codex");
       await this.progress(this.tasks.getTask(task.id), "Codex is editing code");
-      const codexResult = await runCodex(this.env, this.tasks.getTask(task.id), repoWorks.map((item) => item.dir), workspace);
+      const codexResult = await runCodex(this.env, this.tasks.getTask(task.id), repoWorks.map((item) => item.dir), workspace, {
+        onProgress: (update) => this.progress(this.tasks.getTask(task.id), update.chunk)
+      });
       const currentTask = this.tasks.getTask(task.id);
       this.tasks.addCodexRun({
         id: codexResult.runId,
@@ -246,11 +254,11 @@ export class TaskRunner {
         githubBranch: branch,
         githubCommitSha: commitSha
       });
-      await this.progress(this.tasks.getTask(task.id), "Task succeeded");
+      await this.progress(this.tasks.getTask(task.id), codexResult.summary || "Task succeeded", { force: true, replace: true });
     } catch (error) {
       const summary = error instanceof Error ? error.message : String(error);
       this.tasks.markFailed(task.id, this.tasks.getTask(task.id).currentStage, summary);
-      await this.progress(this.tasks.getTask(task.id), summary);
+      await this.progress(this.tasks.getTask(task.id), summary, { force: true });
     }
   }
 
@@ -268,11 +276,19 @@ export class TaskRunner {
     return repos;
   }
 
-  private async progress(task: TaskRecord, logExcerpt: string): Promise<void> {
+  private async progress(task: TaskRecord, logExcerpt: string, options?: { force?: boolean; replace?: boolean }): Promise<void> {
     if (!this.env.FEISHU_PROGRESS_STREAM_ENABLED || !task.feishuChatId) {
       return;
     }
-    const card = buildTaskCard(task, { logExcerpt });
+    const excerpt = this.bufferProgress(task.id, logExcerpt, Boolean(options?.replace));
+    const now = Date.now();
+    const minIntervalMs = this.env.FEISHU_PROGRESS_MIN_INTERVAL_SECONDS * 1000;
+    const lastProgressAt = this.lastProgressAt.get(task.id) ?? 0;
+    if (!options?.force && task.streamMessageId && now - lastProgressAt < minIntervalMs) {
+      return;
+    }
+    this.lastProgressAt.set(task.id, now);
+    const card = buildTaskCard(task, { logExcerpt: excerpt });
     if (task.streamMessageId) {
       await this.feishu.updateTaskCard(task.streamMessageId, card);
       return;
@@ -281,6 +297,14 @@ export class TaskRunner {
     if (messageId) {
       this.tasks.setStreamMessageId(task.id, messageId);
     }
+  }
+
+  private bufferProgress(taskId: string, logExcerpt: string, replace: boolean): string {
+    const sanitized = sanitizeProgress(logExcerpt);
+    const next = replace ? sanitized : [this.progressTails.get(taskId), sanitized].filter(Boolean).join("\n");
+    const clipped = tail(next, 1800);
+    this.progressTails.set(taskId, clipped);
+    return clipped;
   }
 }
 
@@ -322,4 +346,18 @@ function buildPrBody(task: TaskRecord, repoKind: string, artifactName: string): 
     "",
     "Generated by Feishu Codex Orchestrator."
   ].join("\n");
+}
+
+function sanitizeProgress(value: string): string {
+  return value
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim())
+    .join("\n");
+}
+
+function tail(value: string, max: number): string {
+  return value.length <= max ? value : value.slice(value.length - max);
 }

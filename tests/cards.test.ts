@@ -132,6 +132,24 @@ describe("buildTaskFormCard", () => {
     expect(actionBlock?.actions?.some((button) => button.value?.action === "approve_plan_as_agent")).toBe(true);
     expect(actionBlock?.actions?.some((button) => button.value?.action === "approve")).toBe(false);
   });
+
+  it("hides confirm and retry actions while a task is executing", () => {
+    const card = buildTaskCard(taskRecord({ status: "running", currentStage: "codex_running" })) as {
+      elements: Array<{ tag: string; actions?: Array<{ value?: { action?: string } }> }>;
+    };
+    const actions = card.elements.find((element) => element.tag === "action")?.actions ?? [];
+
+    expect(actions.map((button) => button.value?.action)).toEqual(["status"]);
+  });
+
+  it("shows confirmation only while waiting for approval", () => {
+    const card = buildTaskCard(taskRecord({ status: "waiting_approval", approvalStatus: "pending", autoApproved: false })) as {
+      elements: Array<{ tag: string; actions?: Array<{ value?: { action?: string } }> }>;
+    };
+    const actions = card.elements.find((element) => element.tag === "action")?.actions ?? [];
+
+    expect(actions.map((button) => button.value?.action)).toEqual(["approve", "cancel", "status"]);
+  });
 });
 
 function pendingAsset(id: string, assetType: PendingInputAsset["assetType"]): PendingInputAsset {

@@ -260,13 +260,16 @@ export class TaskService {
 
   approveTask(id: string, feishuUserId?: string): TaskRecord {
     const timestamp = now();
-    this.db
+    const result = this.db
       .prepare(
         `UPDATE tasks
          SET status = 'queued', approval_status = 'approved', current_stage = 'queued', updated_at = ?
          WHERE id = ? AND status = 'waiting_approval'`
       )
       .run(timestamp, id);
+    if (result.changes === 0) {
+      return this.getTask(id);
+    }
     this.db
       .prepare("INSERT INTO approvals (id, task_id, action, feishu_user_id, created_at) VALUES (?, ?, ?, ?, ?)")
       .run(randomUUID(), id, "approved", feishuUserId ?? null, timestamp);
@@ -276,7 +279,7 @@ export class TaskService {
 
   approvePlanAsAgent(id: string, feishuUserId?: string): TaskRecord {
     const timestamp = now();
-    this.db
+    const result = this.db
       .prepare(
         `UPDATE tasks
          SET execution_mode = 'agent', status = 'queued', approval_status = 'approved',
@@ -284,6 +287,9 @@ export class TaskService {
          WHERE id = ? AND execution_mode = 'plan' AND status = 'plan_ready'`
       )
       .run(timestamp, id);
+    if (result.changes === 0) {
+      return this.getTask(id);
+    }
     this.db
       .prepare("INSERT INTO approvals (id, task_id, action, feishu_user_id, created_at) VALUES (?, ?, ?, ?, ?)")
       .run(randomUUID(), id, "approved_plan_as_agent", feishuUserId ?? null, timestamp);
@@ -293,13 +299,16 @@ export class TaskService {
 
   cancelTask(id: string, feishuUserId?: string): TaskRecord {
     const timestamp = now();
-    this.db
+    const result = this.db
       .prepare(
         `UPDATE tasks
          SET status = 'canceled', approval_status = 'rejected', current_stage = 'failed', updated_at = ?, finished_at = ?
-         WHERE id = ? AND status IN ('waiting_approval', 'queued', 'plan_ready')`
+         WHERE id = ? AND status IN ('created', 'waiting_approval', 'queued', 'plan_ready')`
       )
       .run(timestamp, timestamp, id);
+    if (result.changes === 0) {
+      return this.getTask(id);
+    }
     this.db
       .prepare("INSERT INTO approvals (id, task_id, action, feishu_user_id, created_at) VALUES (?, ?, ?, ?, ?)")
       .run(randomUUID(), id, "canceled", feishuUserId ?? null, timestamp);

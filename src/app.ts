@@ -352,12 +352,24 @@ async function handleCardAction(
     return reply.code(400).send({ error: "Missing taskId" });
   }
   if (action.action === "approve") {
+    const task = input.tasks.getTask(action.taskId);
+    if (task.status !== "waiting_approval") {
+      return cardActionResponse(buildTaskCard(task), `任务当前为 ${task.status}，无需再次确认执行`, "info");
+    }
     return cardActionResponse(buildTaskCard(input.tasks.approveTask(action.taskId, action.userId)), "已确认执行");
   }
   if (action.action === "approve_plan_as_agent") {
+    const task = input.tasks.getTask(action.taskId);
+    if (task.executionMode !== "plan" || task.status !== "plan_ready") {
+      return cardActionResponse(buildTaskCard(task), `任务当前为 ${task.status}，暂不能转为 Agent 执行`, "warning");
+    }
     return cardActionResponse(buildTaskCard(input.tasks.approvePlanAsAgent(action.taskId, action.userId)), "已转为 Agent 执行");
   }
   if (action.action === "cancel") {
+    const task = input.tasks.getTask(action.taskId);
+    if (!["waiting_approval", "queued", "plan_ready", "created"].includes(task.status)) {
+      return cardActionResponse(buildTaskCard(task), `任务当前为 ${task.status}，不能取消`, "warning");
+    }
     return cardActionResponse(buildTaskCard(input.tasks.cancelTask(action.taskId, action.userId)), "已取消任务");
   }
   if (action.action === "status") {
