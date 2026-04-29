@@ -119,6 +119,9 @@ export class TaskIngestionService {
       autoApproved,
       deferQueue: selectedAssets.length > 0
     });
+    if (input.draftId) {
+      this.assets.markDraftSubmitted(input.draftId);
+    }
 
     if (selectedAssets.length > 0) {
       try {
@@ -139,10 +142,6 @@ export class TaskIngestionService {
         this.tasks.enqueueTask(task.id);
       }
     }
-    if (input.draftId) {
-      this.assets.markDraftSubmitted(input.draftId);
-    }
-
     if (input.sendInitialCard === false && input.feishuMessageId) {
       this.tasks.setStreamMessageId(task.id, input.feishuMessageId);
     } else if (input.feishuChatId) {

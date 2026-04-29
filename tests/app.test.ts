@@ -45,6 +45,30 @@ const fakeFeishu = {
 } as unknown as FeishuClient;
 
 describe("Feishu card actions", () => {
+  it("requires security-sensitive Feishu settings in production", () => {
+    expect(() =>
+      loadEnv({
+        NODE_ENV: "production",
+        PORT: "3005",
+        WORKER_ENABLED: "false",
+        DATABASE_PATH: ":memory:"
+      })
+    ).toThrow(/FEISHU_VERIFICATION_TOKEN/);
+
+    expect(() =>
+      loadEnv({
+        NODE_ENV: "production",
+        PORT: "3005",
+        WORKER_ENABLED: "false",
+        DATABASE_PATH: ":memory:",
+        FEISHU_VERIFICATION_TOKEN: "verify",
+        FEISHU_ENCRYPT_KEY: "encrypt",
+        FEISHU_ALLOWED_CHAT_IDS: "oc_group",
+        INTERNAL_API_TOKEN: "internal"
+      })
+    ).not.toThrow();
+  });
+
   it("protects internal task details when an API token is configured", async () => {
     const db = new DatabaseSync(":memory:");
     db.exec(schemaSql);
@@ -347,11 +371,13 @@ describe("Feishu card actions", () => {
       failure_stage: string;
       failure_summary: string;
     };
+    const draftRow = db.prepare("SELECT status FROM task_drafts WHERE id = ?").get(draft.id) as { status: string };
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual(expect.objectContaining({ toast: expect.objectContaining({ type: "warning" }) }));
     expect(row.status).toBe("failed");
     expect(row.failure_stage).toBe("input_assets");
     expect(row.failure_summary).toContain("missing permissions");
+    expect(draftRow.status).toBe("submitted");
   });
 
   it("sends help as a new card for form help clicks", async () => {
@@ -555,6 +581,40 @@ describe("Feishu card actions", () => {
     expect(html).toContain("不可预览");
   });
 
+  it("rotates mobile web form tokens when the form is opened", async () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(schemaSql);
+    const assets = new AssetService(db, fakeFeishu);
+    const draft = assets.createDraft({ chatId: "oc_group", userId: "ou_a", sourceMessageId: "om_source" });
+    const app = createApp({
+      env: loadEnv({ PORT: "3005", WORKER_ENABLED: "false", DATABASE_PATH: ":memory:" }),
+      projects,
+      tasks: new TaskService(db),
+      feishu: fakeFeishu,
+      assets
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/forms/tasks/${draft.id}?token=${draft.formToken}`
+    });
+    const rotated = assets.getDraft(draft.id);
+    const oldTokenResponse = await app.inject({
+      method: "GET",
+      url: `/forms/tasks/${draft.id}/assets?token=${draft.formToken}`
+    });
+    const newTokenResponse = await app.inject({
+      method: "GET",
+      url: `/forms/tasks/${draft.id}/assets?token=${rotated.formToken}`
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(rotated.formToken).not.toBe(draft.formToken);
+    expect(response.body).toContain(`token=${rotated.formToken}`);
+    expect(oldTokenResponse.statusCode).toBe(403);
+    expect(newTokenResponse.statusCode).toBe(200);
+  });
+
   it("rejects mobile web forms with an invalid token", async () => {
     const db = new DatabaseSync(":memory:");
     db.exec(schemaSql);
@@ -622,6 +682,36 @@ describe("Feishu card actions", () => {
     expect(response.json()).toEqual(expect.objectContaining({ ok: true, taskId: expect.any(String) }));
     expect(inputCount.count).toBe(1);
     expect(updateTaskCard).toHaveBeenCalledWith("om_form", expect.objectContaining({ header: expect.any(Object) }));
+  });
+
+  it("forces mobile web form submissions to plan mode even when agent is posted", async () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(schemaSql);
+    const assets = new AssetService(db, fakeFeishu);
+    const draft = assets.createDraft({ chatId: "oc_group", userId: "ou_a", sourceMessageId: "om_source" });
+    const app = createApp({
+      env: loadEnv({ PORT: "3005", WORKER_ENABLED: "false", DATABASE_PATH: ":memory:" }),
+      projects,
+      tasks: new TaskService(db),
+      feishu: fakeFeishu,
+      assets
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/forms/tasks/${draft.id}/submit?token=${draft.formToken}`,
+      payload: {
+        projectName: "demo-app",
+        executionMode: "agent",
+        taskType: "bug",
+        scope: "frontend",
+        description: "force plan from web"
+      }
+    });
+    const row = db.prepare("SELECT execution_mode, status FROM tasks").get() as { execution_mode: string; status: string };
+
+    expect(response.statusCode).toBe(200);
+    expect(row).toEqual({ execution_mode: "plan", status: "queued" });
   });
 
   it("proxies pending image previews for the mobile web form", async () => {
@@ -1025,6 +1115,7 @@ describe("Feishu card actions", () => {
 
 function encryptFeishuPayload(encryptKey: string, payload: Record<string, unknown>): string {
   const key = createHash("sha256").update(encryptKey).digest();
-  const cipher = createCipheriv("aes-256-cbc", key, key.subarray(0, 16));
-  return Buffer.concat([cipher.update(JSON.stringify(payload), "utf8"), cipher.final()]).toString("base64");
+  const iv = Buffer.from("0123456789abcdef");
+  const cipher = createCipheriv("aes-256-cbc", key, iv);
+  return Buffer.concat([iv, cipher.update(JSON.stringify(payload), "utf8"), cipher.final()]).toString("base64");
 }

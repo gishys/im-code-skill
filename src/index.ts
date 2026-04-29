@@ -27,6 +27,8 @@ console.log(
     service: "feishu-codex-orchestrator",
     port: env.PORT,
     feishuConnectionMode: env.FEISHU_CONNECTION_MODE,
+    feishuEncryptionEnabled: Boolean(env.FEISHU_ENCRYPT_KEY),
+    feishuVerificationTokenEnabled: Boolean(env.FEISHU_VERIFICATION_TOKEN),
     feishuEventsUrl: env.FEISHU_PUBLIC_BASE_URL ? `${env.FEISHU_PUBLIC_BASE_URL}/feishu/events` : null,
     feishuActionsUrl: env.FEISHU_PUBLIC_BASE_URL ? `${env.FEISHU_PUBLIC_BASE_URL}/feishu/actions` : null
   })

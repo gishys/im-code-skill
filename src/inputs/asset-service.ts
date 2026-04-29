@@ -7,7 +7,7 @@ import type { FeishuClient } from "../feishu/client.js";
 import type { FeishuMessageEvent } from "../feishu/events.js";
 import type { InputAsset, PendingInputAsset, TaskDraft } from "../types.js";
 
-const pendingAssetTtlMs = 2 * 60 * 60 * 1000;
+const pendingAssetTtlMs = 20 * 60 * 1000;
 const defaultCandidateLimit = 20;
 
 function now(): string {
@@ -98,8 +98,34 @@ export class AssetService {
     this.db.prepare("UPDATE task_drafts SET form_message_id = ?, updated_at = ? WHERE id = ?").run(messageId, now(), draftId);
   }
 
+  rotateDraftFormToken(draftId: string, token: string): TaskDraft | undefined {
+    const draft = this.verifyDraftFormToken(draftId, token);
+    if (!draft) {
+      return undefined;
+    }
+    const formToken = randomUUID().replace(/-/g, "") + randomUUID().replace(/-/g, "");
+    const timestamp = now();
+    this.db
+      .prepare("UPDATE task_drafts SET form_token = ?, updated_at = ?, expires_at = ? WHERE id = ? AND form_token = ? AND status = 'active'")
+      .run(formToken, timestamp, expiresAt(), draftId, token);
+    return this.getDraft(draftId);
+  }
+
   markDraftSubmitted(draftId: string): void {
     this.db.prepare("UPDATE task_drafts SET status = 'submitted', updated_at = ? WHERE id = ?").run(now(), draftId);
+  }
+
+  claimDraftSubmission(draftId: string, token?: string): TaskDraft | undefined {
+    this.expireOldDraftsAndAssets();
+    const timestamp = now();
+    const statement = token
+      ? this.db.prepare("UPDATE task_drafts SET status = 'submitted', updated_at = ? WHERE id = ? AND form_token = ? AND status = 'active' AND expires_at > ?")
+      : this.db.prepare("UPDATE task_drafts SET status = 'submitted', updated_at = ? WHERE id = ? AND status = 'active' AND expires_at > ?");
+    const result = token ? statement.run(timestamp, draftId, token, timestamp) : statement.run(timestamp, draftId, timestamp);
+    if (result.changes !== 1) {
+      return undefined;
+    }
+    return this.getDraft(draftId);
   }
 
   verifyDraftFormToken(draftId: string, token?: string): TaskDraft | undefined {

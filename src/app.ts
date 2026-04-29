@@ -1,5 +1,5 @@
 import Fastify from "fastify";
-import { createDecipheriv, createHash, timingSafeEqual } from "node:crypto";
+import { createDecipheriv, createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { AppEnv } from "./config/env.js";
 import type { PendingInputAsset, ProjectConfig, TaskDraft, TaskExecutionMode, TaskFormInput, TaskRecord, TaskScope, TaskType } from "./types.js";
 import type { FeishuClient } from "./feishu/client.js";
@@ -16,7 +16,22 @@ export function createApp(input: {
   feishu: FeishuClient;
   assets: AssetService;
 }) {
-  const app = Fastify({ logger: true, bodyLimit: input.env.REQUEST_BODY_LIMIT_BYTES });
+  const app = Fastify({
+    logger: {
+      serializers: {
+        req(request) {
+          return {
+            method: request.method,
+            url: redactUrlToken(request.url),
+            host: request.host,
+            remoteAddress: request.raw.socket.remoteAddress,
+            remotePort: request.raw.socket.remotePort
+          };
+        }
+      }
+    },
+    bodyLimit: input.env.REQUEST_BODY_LIMIT_BYTES
+  });
   const ingestion = new TaskIngestionService(input.projects, input.tasks, input.feishu, input.assets, input.env.WORKSPACE_ROOT);
 
   app.addHook("onRequest", async (_request, reply) => {
@@ -24,6 +39,7 @@ export function createApp(input: {
     reply.header("Referrer-Policy", "no-referrer");
     reply.header("X-Frame-Options", "DENY");
     reply.header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+    reply.header("Content-Security-Policy", defaultCsp());
   });
 
   app.get("/health", async () => ({
@@ -82,14 +98,16 @@ export function createApp(input: {
   app.get("/forms/tasks/:draftId", async (request, reply) => {
     const { draftId } = request.params as { draftId: string };
     const token = getToken(request.query);
-    const draft = input.assets.verifyDraftFormToken(draftId, token);
+    const draft = token ? input.assets.rotateDraftFormToken(draftId, token) : undefined;
     if (!draft) {
       return reply.code(403).type("text/html; charset=utf-8").send(renderMessagePage("表单不可用", "任务表单已过期或链接无效，请回到飞书重新打开表单。"));
     }
     const assetCandidates = input.assets.getPendingAssetCandidates({ draftId: draft.id });
+    const nonce = cspNonce();
     return reply
       .type("text/html; charset=utf-8")
-      .send(renderTaskFormPage({ draftId: draft.id, token: draft.formToken, projects: input.projects, assets: assetCandidates }));
+      .header("Content-Security-Policy", htmlCsp(nonce))
+      .send(renderTaskFormPage({ draftId: draft.id, token: draft.formToken, projects: input.projects, assets: assetCandidates, nonce }));
   });
 
   app.post("/forms/tasks/:draftId/submit", async (request, reply) => {
@@ -99,7 +117,7 @@ export function createApp(input: {
     if (!draft) {
       return reply.code(403).send({ ok: false, error: "任务表单已过期或链接无效，请回到飞书重新打开表单。" });
     }
-    const form = parseTaskFormInput(normalizeWebFormValues(request.body));
+    const form = parseTaskFormInput(normalizeWebFormValues(request.body), { allowAgent: false });
     if (!form.ok) {
       return reply.code(400).send({ ok: false, error: form.error });
     }
@@ -107,18 +125,23 @@ export function createApp(input: {
       return reply.code(400).send({ ok: false, error: "已填写附件说明，但还没有选择要关联的附件。" });
     }
 
+    const claimedDraft = input.assets.claimDraftSubmission(draft.id, token);
+    if (!claimedDraft) {
+      return reply.code(403).send({ ok: false, error: "Form was already submitted or expired" });
+    }
+
     try {
       const task = await ingestion.ingestTaskForm({
         form: form.value,
-        draftId: draft.id,
-        feishuEventId: draft.formMessageId ? `webform:${draft.formMessageId}:${Date.now()}` : `webform:${draft.id}:${Date.now()}`,
-        feishuChatId: draft.feishuChatId,
-        feishuMessageId: draft.formMessageId ?? undefined,
-        feishuUserId: draft.feishuUserId,
-        sendInitialCard: draft.formMessageId ? false : true
+        draftId: claimedDraft.id,
+        feishuEventId: claimedDraft.formMessageId ? `webform:${claimedDraft.formMessageId}:${Date.now()}` : `webform:${claimedDraft.id}:${Date.now()}`,
+        feishuChatId: claimedDraft.feishuChatId,
+        feishuMessageId: claimedDraft.formMessageId ?? undefined,
+        feishuUserId: claimedDraft.feishuUserId,
+        sendInitialCard: claimedDraft.formMessageId ? false : true
       });
-      if (draft.formMessageId) {
-        await input.feishu.updateTaskCard(draft.formMessageId, buildTaskCard(task)).catch((error) => {
+      if (claimedDraft.formMessageId) {
+        await input.feishu.updateTaskCard(claimedDraft.formMessageId, buildTaskCard(task)).catch((error) => {
           request.log.warn({ err: error, taskId: task.id }, "Failed to update Feishu form card after web form submission");
         });
       }
@@ -167,7 +190,7 @@ export function createApp(input: {
   app.post("/feishu/events", async (request, reply) => {
     const body = unwrapFeishuRequest(input.env, request.body as Record<string, unknown>);
     if (!body) {
-      request.log.warn("Rejected unreadable Feishu event");
+      request.log.warn(feishuBodyDebug(input.env, request.body, request.headers["content-type"]), "Rejected unreadable Feishu event");
       return reply.code(400).send({ error: "Invalid encrypted payload" });
     }
     if (!verifyFeishuRequest(input.env, body)) {
@@ -254,7 +277,7 @@ export function createApp(input: {
   app.post("/feishu/actions", async (request, reply) => {
     const body = unwrapFeishuRequest(input.env, request.body as Record<string, unknown>);
     if (!body) {
-      request.log.warn("Rejected unreadable Feishu action");
+      request.log.warn(feishuBodyDebug(input.env, request.body, request.headers["content-type"]), "Rejected unreadable Feishu action");
       return reply.code(400).send({ error: "Invalid encrypted payload" });
     }
     if (!verifyFeishuRequest(input.env, body)) {
@@ -368,10 +391,16 @@ async function handleCardAction(
       );
     }
 
+    const claimedDraft = action.draftId ? input.assets.claimDraftSubmission(action.draftId) : undefined;
+    if (action.draftId && !claimedDraft) {
+      const message = "Form was already submitted or expired";
+      return updateCurrentCardOrRespond(input, action, buildTaskFormCard(input.projects, formCardInput(input, action, message)), message, "warning");
+    }
+
     try {
       const task = await ingestion.ingestTaskForm({
         form: form.value,
-        draftId: action.draftId,
+        draftId: claimedDraft?.id ?? action.draftId,
         feishuEventId: action.messageId ? `form:${action.messageId}:${Date.now()}` : `form:${Date.now()}`,
         feishuChatId: action.chatId,
         feishuMessageId: action.messageId,
@@ -536,6 +565,23 @@ function taskFormUrl(env: AppEnv, draft: TaskDraft): string | undefined {
   return `${base}/forms/tasks/${encodeURIComponent(draft.id)}?token=${encodeURIComponent(draft.formToken)}`;
 }
 
+function cspNonce(): string {
+  return randomBytes(16).toString("base64");
+}
+
+function defaultCsp(): string {
+  return "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+}
+
+function htmlCsp(nonce: string): string {
+  const escapedNonce = nonce.replace(/'/g, "");
+  return `default-src 'self'; script-src 'self' 'nonce-${escapedNonce}'; style-src 'self' 'nonce-${escapedNonce}'; img-src 'self' data:; media-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`;
+}
+
+function redactUrlToken(url: string): string {
+  return url.replace(/([?&]token=)[^&]+/gi, "$1[REDACTED]");
+}
+
 function getToken(query: unknown): string | undefined {
   const token = (query as { token?: unknown } | undefined)?.token;
   return typeof token === "string" ? token : undefined;
@@ -554,11 +600,11 @@ function normalizeWebFormValues(body: unknown): Record<string, string> {
   return result;
 }
 
-function renderMessagePage(title: string, message: string): string {
-  return htmlPage(title, `<main class="shell"><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p></main>`);
+function renderMessagePage(title: string, message: string, nonce = cspNonce()): string {
+  return htmlPage(title, `<main class="shell"><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p></main>`, nonce);
 }
 
-function renderTaskFormPage(input: { draftId: string; token: string; projects: ProjectConfig[]; assets: PendingInputAsset[] }): string {
+function renderTaskFormPage(input: { draftId: string; token: string; projects: ProjectConfig[]; assets: PendingInputAsset[]; nonce?: string }): string {
   const submitUrl = `/forms/tasks/${encodeURIComponent(input.draftId)}/submit?token=${encodeURIComponent(input.token)}`;
   const assetsUrl = `/forms/tasks/${encodeURIComponent(input.draftId)}/assets?token=${encodeURIComponent(input.token)}`;
   const projectOptions = input.projects.map((project) => `<option value="${escapeHtml(project.name)}">${escapeHtml(project.name)}</option>`).join("");
@@ -576,7 +622,7 @@ function renderTaskFormPage(input: { draftId: string; token: string; projects: P
   </header>
   <form id="task-form" class="task-form">
     <label>项目<select name="projectName" required>${projectOptions}</select></label>
-    <label>执行模式<select name="executionMode" required><option value="plan">先出方案</option><option value="agent">直接执行</option></select></label>
+    <label>执行模式<select name="executionMode" required><option value="plan">先出方案</option></select></label>
     <label>任务类型<select name="taskType" required><option value="bug">Bug 修复</option><option value="feature">功能需求</option></select></label>
     <label>修改范围<select name="scope" required><option value="frontend">前端</option><option value="backend">后端</option><option value="fullstack" selected>全栈</option></select></label>
     <label>描述<textarea name="description" required rows="5" placeholder="请写清：要改什么、如何复现、期望结果、验收标准"></textarea></label>
@@ -599,7 +645,7 @@ function renderTaskFormPage(input: { draftId: string; token: string; projects: P
     <p id="preview-error" class="status error"></p>
   </div>
 </div>
-<script>
+<script nonce="${escapeHtml(input.nonce ?? "")}">
 const form = document.getElementById("task-form");
 const statusEl = document.getElementById("status");
 const assetList = document.getElementById("asset-list");
@@ -816,7 +862,8 @@ form.addEventListener("submit", async (event) => {
   statusEl.textContent = "任务已提交，正在返回飞书会话...";
   window.setTimeout(returnToFeishuConversation, 650);
 });
-</script>`
+</script>`,
+    input.nonce
   );
 }
 
@@ -845,14 +892,14 @@ function shortAssetName(value: string): string {
   return value.length > 34 ? `${value.slice(0, 33)}...` : value;
 }
 
-function htmlPage(title: string, body: string): string {
+function htmlPage(title: string, body: string, nonce = cspNonce()): string {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>${escapeHtml(title)}</title>
-  <style>
+  <style nonce="${escapeHtml(nonce)}">
     * { box-sizing: border-box; }
     html { width: 100%; min-height: 100%; overflow-x: hidden; scroll-padding-top: 16px; scroll-padding-bottom: calc(var(--keyboard-inset, 0px) + 96px); background: #f5f7fb; }
     body { width: 100%; min-height: 100%; overflow-x: hidden; margin: 0; background: #f5f7fb; color: #1f2329; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
@@ -961,18 +1008,37 @@ function verifyFeishuRequest(env: AppEnv, body: Record<string, unknown>): boolea
 }
 
 function unwrapFeishuRequest(env: AppEnv, body: Record<string, unknown>): Record<string, unknown> | null {
+  if (!isRecord(body)) {
+    return null;
+  }
   if (!env.FEISHU_ENCRYPT_KEY || typeof body.encrypt !== "string") {
     return body;
   }
   try {
     const key = createHash("sha256").update(env.FEISHU_ENCRYPT_KEY).digest();
-    const decipher = createDecipheriv("aes-256-cbc", key, key.subarray(0, 16));
-    const decrypted = Buffer.concat([decipher.update(body.encrypt, "base64"), decipher.final()]).toString("utf8");
+    const encrypted = Buffer.from(body.encrypt, "base64");
+    if (encrypted.length <= 16) {
+      return null;
+    }
+    const iv = encrypted.subarray(0, 16);
+    const ciphertext = encrypted.subarray(16);
+    const decipher = createDecipheriv("aes-256-cbc", key, iv);
+    const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
     const parsed = JSON.parse(decrypted) as unknown;
     return isRecord(parsed) ? parsed : null;
   } catch {
     return null;
   }
+}
+
+function feishuBodyDebug(env: AppEnv, body: unknown, contentType: string | string[] | undefined): Record<string, unknown> {
+  return {
+    feishuEncryptionEnabled: Boolean(env.FEISHU_ENCRYPT_KEY),
+    bodyType: Array.isArray(body) ? "array" : body === null ? "null" : typeof body,
+    bodyKeys: isRecord(body) ? Object.keys(body).slice(0, 8) : [],
+    hasEncryptField: isRecord(body) && typeof body.encrypt === "string",
+    contentType: firstHeader(contentType)
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1007,10 +1073,13 @@ function safeEqual(left?: string, right?: string): boolean {
   return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
 }
 
-function parseTaskFormInput(values: Record<string, string>): { ok: true; value: TaskFormInput } | { ok: false; error: string } {
+function parseTaskFormInput(
+  values: Record<string, string>,
+  options: { allowAgent?: boolean } = {}
+): { ok: true; value: TaskFormInput } | { ok: false; error: string } {
   const projectName = values.projectName?.trim();
   const parsedExecutionMode = normalizeExecutionMode(values.executionMode);
-  const executionMode = parsedExecutionMode ?? "plan";
+  const executionMode = options.allowAgent === false ? "plan" : (parsedExecutionMode ?? "plan");
   const taskType = normalizeTaskType(values.taskType);
   const scope = normalizeScope(values.scope);
   const description = values.description?.trim();
