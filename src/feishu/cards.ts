@@ -233,7 +233,7 @@ export function buildTaskFormCard(
                 ["backend", "后端"],
                 ["fullstack", "全栈"]
               ],
-              input?.values?.scope
+              input?.values?.scope ?? "fullstack"
             ),
             options: [
               { text: { tag: "plain_text", content: "前端" }, value: "frontend" },

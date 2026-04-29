@@ -123,6 +123,14 @@ describe("buildTaskFormCard", () => {
     expect(mode.initial_option).toBeUndefined();
   });
 
+  it("defaults the scope field to fullstack on new task forms", () => {
+    const card = buildTaskFormCard(projects, { draftId: "draft-1" }) as { elements: Array<Record<string, unknown>> };
+    const form = card.elements.find((element) => element.tag === "form") as { elements: Array<Record<string, unknown>> };
+    const scope = form.elements.find((element) => element.name === "scope") as { initial_index?: number };
+
+    expect(scope.initial_index).toBe(2);
+  });
+
   it("renders plan-ready tasks with a convert-to-agent action", () => {
     const card = buildTaskCard(taskRecord({ executionMode: "plan", status: "plan_ready", planSummary: "Plan body" })) as {
       elements: Array<{ tag: string; actions?: Array<{ value?: { action?: string } }> }>;

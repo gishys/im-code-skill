@@ -545,8 +545,10 @@ describe("Feishu card actions", () => {
     expect(html).toContain("screen.png");
     expect(html).toContain("data-preview=");
     expect(html).toContain("notes.txt");
+    expect(html).toContain('<option value="fullstack" selected>');
     expect(html).toContain("100svh");
     expect(html).toContain("keepFieldVisible");
+    expect(html).toContain('behavior: "auto"');
     expect(html).toContain("returnToFeishuConversation");
     expect(html).toContain("任务已提交，正在返回飞书会话");
     expect(html).not.toContain("window.scrollTo(0, 0)");

@@ -578,7 +578,7 @@ function renderTaskFormPage(input: { draftId: string; token: string; projects: P
     <label>项目<select name="projectName" required>${projectOptions}</select></label>
     <label>执行模式<select name="executionMode" required><option value="plan">先出方案</option><option value="agent">直接执行</option></select></label>
     <label>任务类型<select name="taskType" required><option value="bug">Bug 修复</option><option value="feature">功能需求</option></select></label>
-    <label>修改范围<select name="scope" required><option value="frontend">前端</option><option value="backend">后端</option><option value="fullstack">全栈</option></select></label>
+    <label>修改范围<select name="scope" required><option value="frontend">前端</option><option value="backend">后端</option><option value="fullstack" selected>全栈</option></select></label>
     <label>描述<textarea name="description" required rows="5" placeholder="请写清：要改什么、如何复现、期望结果、验收标准"></textarea></label>
     <section class="asset-section">
       <h2>关联附件</h2>
@@ -724,20 +724,26 @@ async function refreshAssets() {
     refreshButton.textContent = "刷新附件";
   }
 }
-function updateViewport() {
+let fieldVisibilityTimer;
+function updateViewport(options = {}) {
   const viewport = window.visualViewport;
-  const height = Math.max(320, Math.floor(viewport ? viewport.height : window.innerHeight));
+  const keyboardOpen = Boolean(viewport && window.innerHeight - viewport.height > 80);
+  const heightSource = keyboardOpen ? window.innerHeight : (viewport ? viewport.height : window.innerHeight);
+  const height = Math.max(320, Math.floor(heightSource));
   const width = Math.floor(viewport ? viewport.width : window.innerWidth);
   document.documentElement.style.setProperty("--viewport-height", height + "px");
   document.documentElement.style.setProperty("--viewport-width", width + "px");
   const bottomInset = viewport ? Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop) : 0;
-  const keyboardOpen = Boolean(viewport && window.innerHeight - viewport.height > 80);
   document.documentElement.style.setProperty("--keyboard-inset", bottomInset + "px");
   document.documentElement.classList.toggle("keyboard-open", keyboardOpen);
   const active = document.activeElement;
-  if (keyboardOpen && active && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName)) {
-    window.setTimeout(() => keepFieldVisible(active), 40);
+  if (options.keepActive && keyboardOpen && active && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName)) {
+    scheduleKeepFieldVisible(active);
   }
+}
+function scheduleKeepFieldVisible(element, delay = 80) {
+  window.clearTimeout(fieldVisibilityTimer);
+  fieldVisibilityTimer = window.setTimeout(() => keepFieldVisible(element), delay);
 }
 function keepFieldVisible(element) {
   const viewport = window.visualViewport;
@@ -745,23 +751,27 @@ function keepFieldVisible(element) {
   const visibleBottom = visibleTop + (viewport ? viewport.height : window.innerHeight);
   const rect = element.getBoundingClientRect();
   const margin = 18;
-  if (rect.top < visibleTop + margin || rect.bottom > visibleBottom - margin) {
-    element.scrollIntoView({ block: "center", behavior: "smooth" });
+  const topDelta = rect.top - visibleTop - margin;
+  const bottomDelta = rect.bottom - visibleBottom + margin;
+  if (bottomDelta > 0) {
+    window.scrollBy({ top: bottomDelta, left: 0, behavior: "auto" });
+  } else if (topDelta < 0) {
+    window.scrollBy({ top: topDelta, left: 0, behavior: "auto" });
   }
 }
 updateViewport();
 if (window.visualViewport) {
-  window.visualViewport.addEventListener("resize", updateViewport);
-  window.visualViewport.addEventListener("scroll", updateViewport);
+  window.visualViewport.addEventListener("resize", () => updateViewport({ keepActive: true }), { passive: true });
+  window.visualViewport.addEventListener("scroll", () => updateViewport(), { passive: true });
 }
-window.addEventListener("resize", updateViewport);
+window.addEventListener("resize", () => updateViewport({ keepActive: true }), { passive: true });
 document.querySelectorAll("input,select,textarea").forEach((element) => {
   element.addEventListener("focus", () => {
-    window.setTimeout(updateViewport, 40);
-    window.setTimeout(() => keepFieldVisible(element), 140);
-    window.setTimeout(() => keepFieldVisible(element), 320);
+    window.setTimeout(() => updateViewport({ keepActive: true }), 40);
+    scheduleKeepFieldVisible(element, 180);
   });
   element.addEventListener("blur", () => {
+    window.clearTimeout(fieldVisibilityTimer);
     window.setTimeout(updateViewport, 80);
     window.setTimeout(updateViewport, 260);
     window.setTimeout(updateViewport, 520);
