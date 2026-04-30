@@ -290,4 +290,88 @@ describe("delivery thread model", () => {
       await rm(workspace, { recursive: true, force: true });
     }
   });
+
+  it("keeps user-facing Codex summaries free of event and diagnostic noise", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "codex-summary-"));
+    try {
+      await writeFile(
+        join(workspace, "exec"),
+        [
+          'const emit = (event) => process.stdout.write(`${JSON.stringify(event)}\\n`);',
+          'emit({ type: "thread.started" });',
+          'emit({ type: "turn.started" });',
+          `emit({ type: "item.started", command: "\\"C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe\\" -Command 'git status --short'" });`,
+          'emit({ type: "message", text: "目标\\n确认 frontend 和 backend 仓库是否存在未提交代码。\\n\\n检查结果\\n- frontend：工作区干净\\n- backend：工作区干净" });',
+          'process.stdout.write("ERROR codex_core::session: failed to record rollout items: thread 019ddd39-e771-7913-b04b-76206bb8656a not found\\n");',
+          'process.stdout.write("2026-04-30T07:11:09.634178Z failed to record rollout items: thread 019ddd39-e771-7913-b04b-76206bb8656a not found\\n");'
+        ].join("\n"),
+        "utf8"
+      );
+      const env = loadEnv({
+        CODEX_COMMAND: "node",
+        CODEX_TIMEOUT_SECONDS: "10",
+        CODEX_STARTUP_TIMEOUT_SECONDS: "10",
+        CODEX_JSON_EVENTS_ENABLED: "true"
+      });
+      const progressChunks: string[] = [];
+      const result = await runCodexPlan(env, baseTaskRecord(), [workspace], workspace, {
+        onProgress: (update) => {
+          progressChunks.push(update.chunk);
+        }
+      });
+      const summary = await readFile(result.summaryPath, "utf8");
+
+      expect(summary).toContain("目标");
+      expect(summary).toContain("frontend：工作区干净");
+      expect(summary).not.toContain("[thread.started]");
+      expect(summary).not.toContain("PowerShell");
+      expect(summary).not.toContain("会话记录失败");
+      expect(progressChunks.join("\n")).toContain("目标");
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
 });
+
+function baseTaskRecord() {
+  return {
+    id: "task-1",
+    threadId: "thread-1",
+    changesetId: null,
+    currentPlanVersionId: null,
+    deliveryStatus: "active",
+    feishuEventId: null,
+    feishuChatId: null,
+    feishuMessageId: null,
+    feishuUserId: null,
+    projectName: "demo-app",
+    taskType: "feature",
+    scope: "frontend",
+    executionMode: "plan",
+    rawText: "raw",
+    parsedDescription: "check repo status",
+    status: "queued",
+    approvalStatus: "auto_approved",
+    autoApproved: true,
+    currentStage: "planning",
+    failureStage: null,
+    failureSummary: null,
+    workspacePath: null,
+    artifactPath: null,
+    artifactFileKey: null,
+    planSummary: null,
+    planArtifactPath: null,
+    inputAssetsJson: null,
+    streamMessageId: null,
+    githubPrUrl: null,
+    githubBranch: null,
+    githubCommitSha: null,
+    lockedBy: null,
+    lockedAt: null,
+    heartbeatAt: null,
+    createdAt: "2026-04-28T00:00:00.000Z",
+    updatedAt: "2026-04-28T00:00:00.000Z",
+    startedAt: null,
+    finishedAt: null
+  } as const;
+}

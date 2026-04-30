@@ -54,6 +54,7 @@ export function buildTaskCard(task: TaskRecord, extra?: { logExcerpt?: string })
     `**范围**：${scopeLabel[task.scope] ?? task.scope}`,
     `**状态**：${statusLabel[task.status] ?? task.status}`,
     `**阶段**：${stageLabel[task.currentStage] ?? task.currentStage}`,
+    `**更新时间**：${formatLocalDateTime(task.updatedAt)}`,
     inputAssetCount > 0 ? `**关联附件**：${inputAssetCount} 个` : undefined,
     task.planSummary ? `**方案摘要**：\n${task.planSummary}` : undefined,
     task.githubPrUrl ? `**PR**：${task.githubPrUrl}` : undefined,
@@ -645,4 +646,23 @@ function countInputAssets(value?: string | null): number {
   } catch {
     return 0;
   }
+}
+
+function formatLocalDateTime(value?: string | null): string {
+  if (!value) {
+    return "-";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "Asia/Shanghai"
+  }).format(date);
 }

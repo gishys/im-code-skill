@@ -40,7 +40,7 @@ export async function runCodex(env: AppEnv, task: TaskRecord, repoDirs: string[]
   const result = await runCodexCommand(env, workspace, prompt, options);
   const finishedAt = new Date().toISOString();
   const output = localizeCodexOutput(redactSecrets(result.all ?? ""));
-  const summary = tail(output, 1200);
+  const summary = buildUserFacingCodexSummary(output, 1200);
   await writeFile(logPath, output, "utf8");
   await writeFile(summaryPath, summary, "utf8");
 
@@ -72,7 +72,7 @@ export async function runCodexPlan(env: AppEnv, task: TaskRecord, repoDirs: stri
   const result = await runCodexCommand(env, workspace, prompt, options);
   const finishedAt = new Date().toISOString();
   const output = localizeCodexOutput(redactSecrets(result.all ?? ""));
-  const summary = tail(output, 2000);
+  const summary = buildUserFacingCodexSummary(output, 2000);
   await writeFile(logPath, output, "utf8");
   await writeFile(planPath, output, "utf8");
   await writeFile(summaryPath, summary, "utf8");
@@ -325,6 +325,52 @@ function buildCodexPlanPrompt(task: TaskRecord, repoDirs: string[], maxChars: nu
 
 function tail(value: string, max: number): string {
   return value.length <= max ? value : value.slice(value.length - max);
+}
+
+function buildUserFacingCodexSummary(value: string, max: number): string {
+  const cleaned = sanitizeCodexSummary(value);
+  return tail(cleaned || "Codex 未返回可展示的摘要，请查看完整日志。", max);
+}
+
+function sanitizeCodexSummary(value: string): string {
+  const lines = value
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => isUserFacingCodexLine(line));
+  return collapseBlankLines(lines).join("\n").trim();
+}
+
+function collapseBlankLines(lines: string[]): string[] {
+  const result: string[] = [];
+  for (const line of lines) {
+    if (!line.trim() && !result.at(-1)?.trim()) {
+      continue;
+    }
+    result.push(line);
+  }
+  return result;
+}
+
+function isUserFacingCodexLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return true;
+  }
+  if (/^\[(?:thread|turn|item)\.(?:started|completed|failed)\]/.test(trimmed)) {
+    return false;
+  }
+  if (trimmed.includes("Codex 会话记录失败：线程")) {
+    return false;
+  }
+  if (/^ERROR codex_core::session:/.test(trimmed)) {
+    return false;
+  }
+  if (/^"?(?:[A-Z]:\\|\/).*(?:powershell(?:\.exe)?|git|npm|pnpm|yarn|node)(?:["\s]|$)/i.test(trimmed)) {
+    return false;
+  }
+  return true;
 }
 
 async function prepareRunWorkspace(workspace: string, runType: CodexRunType): Promise<{

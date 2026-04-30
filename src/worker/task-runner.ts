@@ -464,7 +464,7 @@ function sanitizeProgress(value: string): string {
     .replace(/\r/g, "\n")
     .split("\n")
     .map((line) => localizeProgressLine(line.trimEnd()))
-    .filter((line) => line.trim())
+    .filter((line) => shouldShowProgressLine(line))
     .join("\n");
 }
 
@@ -477,6 +477,26 @@ function localizeProgressLine(line: string): string {
       "错误 Codex 会话记录失败：线程 $1 不存在"
     )
     .replace(/^failed to record rollout items: thread ([^\s]+) not found$/, "Codex 会话记录失败：线程 $1 不存在");
+}
+
+function shouldShowProgressLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (/^\[(?:thread|turn|item)\.(?:started|completed|failed)\]/.test(trimmed)) {
+    return false;
+  }
+  if (trimmed.includes("Codex 会话记录失败：线程")) {
+    return false;
+  }
+  if (/^ERROR codex_core::session:/.test(trimmed)) {
+    return false;
+  }
+  if (/^"?(?:[A-Z]:\\|\/).*(?:powershell(?:\.exe)?|git|npm|pnpm|yarn|node)(?:["\s]|$)/i.test(trimmed)) {
+    return false;
+  }
+  return true;
 }
 
 function tail(value: string, max: number): string {
