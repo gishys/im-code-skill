@@ -1,5 +1,5 @@
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execa } from "execa";
@@ -63,6 +63,62 @@ describe("prepareCachedRepoWorktree", () => {
       ["worktree", "add", "--detach", join(tempRoot, "workspaces", "task-1", "frontend"), "origin/main"],
       { cwd: cacheDir, all: true }
     );
+  });
+
+  it("reuses an existing detached worktree on retry", async () => {
+    const cacheRoot = join(tempRoot, "repo-cache");
+    const cacheDir = join(cacheRoot, "github.com-example-demo-frontend-23730ded93fa2663");
+    const destination = join(tempRoot, "workspaces", "task-1", "frontend");
+    await mkdir(cacheDir, { recursive: true });
+    await mkdir(destination, { recursive: true });
+
+    await prepareCachedRepoWorktree({
+      repo: "git@github.com:example/demo-frontend.git",
+      branch: "main",
+      cacheRoot,
+      destination
+    });
+
+    expect(execaMock).not.toHaveBeenCalledWith("git", expect.arrayContaining(["worktree", "add"]), expect.anything());
+    expect(execaMock).toHaveBeenCalledWith("git", ["checkout", "--detach", "origin/main"], { cwd: destination, all: true });
+    expect(execaMock).toHaveBeenCalledWith("git", ["reset", "--hard", "origin/main"], { cwd: destination, all: true });
+    expect(execaMock).toHaveBeenCalledWith("git", ["clean", "-fd"], { cwd: destination, all: true });
+  });
+
+  it("reuses an existing branch worktree on retry", async () => {
+    const cacheRoot = join(tempRoot, "repo-cache");
+    const cacheDir = join(cacheRoot, "github.com-example-demo-frontend-23730ded93fa2663");
+    const destination = join(tempRoot, "workspaces", "task-1", "frontend");
+    await mkdir(cacheDir, { recursive: true });
+    await mkdir(destination, { recursive: true });
+
+    await prepareCachedRepoWorktree({
+      repo: "git@github.com:example/demo-frontend.git",
+      branch: "main",
+      cacheRoot,
+      destination,
+      worktreeBranch: "codex/task-1"
+    });
+
+    expect(execaMock).not.toHaveBeenCalledWith("git", expect.arrayContaining(["worktree", "add"]), expect.anything());
+    expect(execaMock).toHaveBeenCalledWith("git", ["checkout", "-B", "codex/task-1", "origin/main"], { cwd: destination, all: true });
+    expect(execaMock).toHaveBeenCalledWith("git", ["reset", "--hard", "origin/main"], { cwd: destination, all: true });
+    expect(execaMock).toHaveBeenCalledWith("git", ["clean", "-fd"], { cwd: destination, all: true });
+  });
+
+  it("resolves relative cache and worktree paths before running git from the cache directory", async () => {
+    await prepareCachedRepoWorktree({
+      repo: "git@github.com:example/demo-frontend.git",
+      branch: "main",
+      cacheRoot: "repo-cache",
+      destination: join("workspaces", "task-1", "frontend")
+    });
+
+    const calls = execaMock.mock.calls as unknown as Array<[string, string[], Record<string, unknown>?]>;
+    const cloneCall = calls.find((call) => call[1][0] === "clone");
+    const worktreeCall = calls.find((call) => call[1][0] === "worktree");
+    expect(cloneCall?.[1][3]).toBe(resolve("repo-cache", "github.com-example-demo-frontend-23730ded93fa2663"));
+    expect(worktreeCall?.[1][3]).toBe(resolve("workspaces", "task-1", "frontend"));
   });
 
   it("strips encoded quote characters from configured repository URLs", async () => {

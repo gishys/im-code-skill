@@ -73,6 +73,8 @@ export function buildTaskCard(task: TaskRecord, extra?: { logExcerpt?: string })
         tag: "div",
         text: { tag: "lark_md", content: lines.join("\n") }
       },
+      ...buildPlanReviewElements(task),
+      ...buildFailedContinuationElements(task),
       {
         tag: "action",
         actions: taskActionsForStatus(task)
@@ -363,18 +365,18 @@ function taskActions(task: TaskRecord): object[] {
     return [
       {
         tag: "button",
-        text: { tag: "plain_text", content: "Continue" },
+        text: { tag: "plain_text", content: "继续处理" },
         type: "primary",
         value: { action: "continue_task", taskId: task.id }
       },
       {
         tag: "button",
-        text: { tag: "plain_text", content: "History" },
+        text: { tag: "plain_text", content: "查看历史" },
         value: { action: "view_history", taskId: task.id }
       },
       {
         tag: "button",
-        text: { tag: "plain_text", content: "Cancel" },
+        text: { tag: "plain_text", content: "取消任务" },
         type: "danger",
         value: { action: "cancel", taskId: task.id }
       }
@@ -462,6 +464,83 @@ function taskActionsForStatus(task: TaskRecord): object[] {
   }
 
   return [statusButton(task.id)];
+}
+
+function buildPlanReviewElements(task: TaskRecord): object[] {
+  if (task.executionMode !== "plan" || task.status !== "plan_ready") {
+    return [];
+  }
+  return [
+    {
+      tag: "hr"
+    },
+    {
+      tag: "div",
+      text: {
+        tag: "lark_md",
+        content: "**方案确认**\n确认后会转为 Agent 执行；如需调整，请填写修改意见并提交，系统会生成新的方案版本。"
+      }
+    },
+    {
+      tag: "form",
+      name: "plan_review_form",
+      elements: [
+        {
+          tag: "input",
+          name: "planFeedback",
+          multiline: true,
+          label: { tag: "plain_text", content: "修改意见" },
+          placeholder: { tag: "plain_text", content: "例如：缩小范围、补充回滚步骤，或调整测试方案" }
+        },
+        {
+          tag: "button",
+          name: "revisePlan",
+          action_type: "form_submit",
+          text: { tag: "plain_text", content: "修改方案" },
+          value: { action: "revise_plan", taskId: task.id }
+        }
+      ]
+    }
+  ];
+}
+
+function buildFailedContinuationElements(task: TaskRecord): object[] {
+  if (task.status !== "failed" && task.status !== "interrupted") {
+    return [];
+  }
+  return [
+    {
+      tag: "hr"
+    },
+    {
+      tag: "div",
+      text: {
+        tag: "lark_md",
+        content: "**继续会话**\n可以补充新的要求、授权说明或报错背景，提交后任务会带着这些上下文重新排队。"
+      }
+    },
+    {
+      tag: "form",
+      name: "failed_continue_form",
+      elements: [
+        {
+          tag: "input",
+          name: "description",
+          multiline: true,
+          label: { tag: "plain_text", content: "补充说明" },
+          placeholder: { tag: "plain_text", content: "例如：已授权本机执行，请复用现有 worktree 后继续。" }
+        },
+        {
+          tag: "button",
+          name: "continueTask",
+          action_type: "form_submit",
+          text: { tag: "plain_text", content: "继续会话" },
+          type: "primary",
+          value: { action: "continue_task", taskId: task.id }
+        }
+      ]
+    }
+  ];
 }
 
 function primaryButton(action: string, taskId: string, content: string): object {

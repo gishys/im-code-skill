@@ -170,10 +170,12 @@ describe("delivery thread model", () => {
   it("keeps each codex exec in an isolated run folder and compacts oversized prompts", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "codex-runs-"));
     try {
-      await writeFile(join(workspace, "exec"), "console.log(process.argv.join(' '));\n", "utf8");
+      await writeFile(join(workspace, "exec"), "process.stdout.write(`${process.env.HTTPS_PROXY}\\n`); process.stdin.pipe(process.stdout);\n", "utf8");
       const env = loadEnv({
         CODEX_COMMAND: "node",
         CODEX_CONTEXT_MAX_CHARS: "900",
+        CODEX_PROXY_URL: "http://127.0.0.1:7897",
+        CODEX_STARTUP_TIMEOUT_SECONDS: "10",
         CODEX_TIMEOUT_SECONDS: "10"
       });
       const progressChunks: string[] = [];
@@ -229,9 +231,61 @@ describe("delivery thread model", () => {
       );
 
       expect(result.runId).toEqual(expect.stringMatching(/^run-/));
+      expect(result.runType).toBe("plan");
       expect(await readFile(result.promptPath, "utf8")).toContain("context compacted");
-      expect(await readFile(result.logPath, "utf8")).toContain("You are planning");
-      expect(progressChunks.join("")).toContain("You are planning");
+      expect(await readFile(result.logPath, "utf8")).toContain("你正在制定");
+      expect(await readFile(result.logPath, "utf8")).toContain("http://127.0.0.1:7897");
+      expect(progressChunks.join("")).toContain("你正在制定");
+
+      const revision = await runCodexPlan(
+        env,
+        {
+          id: "task-1",
+          threadId: "thread-1",
+          changesetId: null,
+          currentPlanVersionId: "plan-1",
+          deliveryStatus: "active",
+          feishuEventId: null,
+          feishuChatId: null,
+          feishuMessageId: null,
+          feishuUserId: null,
+          projectName: "demo-app",
+          taskType: "feature",
+          scope: "frontend",
+          executionMode: "plan",
+          rawText: "raw",
+          parsedDescription: "原始需求\n\n方案修改意见：补充回滚步骤。",
+          status: "queued",
+          approvalStatus: "auto_approved",
+          autoApproved: true,
+          currentStage: "planning",
+          failureStage: null,
+          failureSummary: null,
+          workspacePath: null,
+          artifactPath: null,
+          artifactFileKey: null,
+          planSummary: "Previous plan",
+          planArtifactPath: null,
+          inputAssetsJson: null,
+          streamMessageId: null,
+          githubPrUrl: null,
+          githubBranch: null,
+          githubCommitSha: null,
+          lockedBy: null,
+          lockedAt: null,
+          heartbeatAt: null,
+          createdAt: "2026-04-28T00:00:00.000Z",
+          updatedAt: "2026-04-28T00:00:00.000Z",
+          startedAt: null,
+          finishedAt: null
+        },
+        [workspace],
+        workspace
+      );
+
+      expect(revision.runType).toBe("revise_plan");
+      expect(await readFile(revision.logPath, "utf8")).toContain("你正在修订");
+      expect(await readFile(revision.promptPath, "utf8")).toContain("待修订的当前方案摘要");
     } finally {
       await rm(workspace, { recursive: true, force: true });
     }

@@ -47,9 +47,9 @@ export class TaskRunner {
       await mkdir(workspace, { recursive: true });
       await mkdir(join(workspace, "logs"), { recursive: true });
       this.assertNotCanceled(task.id);
-      await this.progress(task, `Workspace ready: ${workspace}`);
+      await this.progress(task, `工作区已准备：${workspace}`);
 
-      this.tasks.updateStage(task.id, "cloning", "Cloning repositories for planning");
+      this.tasks.updateStage(task.id, "cloning", "正在为方案生成准备代码仓库");
       for (const repo of repoWorks) {
         this.assertNotCanceled(task.id);
         await prepareCachedRepoWorktree({
@@ -62,8 +62,8 @@ export class TaskRunner {
       }
 
       this.assertNotCanceled(task.id);
-      this.tasks.updateStage(task.id, "planning", "Generating implementation plan");
-      await this.progress(this.tasks.getTask(task.id), "Codex is generating a plan");
+      this.tasks.updateStage(task.id, "planning", "正在生成实施方案");
+      await this.progress(this.tasks.getTask(task.id), "Codex 正在生成方案");
       const result = await runCodexPlan(this.env, this.tasks.getTask(task.id), repoWorks.map((item) => item.dir), workspace, {
         shouldCancel: () => this.isTaskCanceled(task.id),
         onProgress: (update) => this.progress(this.tasks.getTask(task.id), update.chunk)
@@ -94,7 +94,7 @@ export class TaskRunner {
         tokenBudgetChars: this.env.CODEX_CONTEXT_MAX_CHARS
       });
       if (result.exitCode !== 0) {
-        throw new Error(`Codex plan failed with exit code ${result.exitCode}`);
+        throw new Error(`Codex 方案生成失败，退出码：${result.exitCode}`);
       }
       await assertReposClean(repoWorks);
       const planVersion = this.tasks.addPlanVersion({
@@ -115,13 +115,13 @@ export class TaskRunner {
         taskId: task.id,
         role: "system",
         messageType: "plan_version_created",
-        content: `Plan version ${planVersion.version} is ready.`,
+        content: `方案版本 ${planVersion.version} 已就绪。`,
         metadata: { planVersionId: planVersion.id }
       });
-      await this.progress(this.tasks.getTask(task.id), result.summary || "Plan is ready", { force: true, replace: true });
+      await this.progress(this.tasks.getTask(task.id), result.summary || "方案已就绪", { force: true, replace: true });
     } catch (error) {
       if (error instanceof TaskCanceledError || this.isTaskCanceled(task.id)) {
-        await this.progress(this.tasks.getTask(task.id), "Task canceled by user", { force: true, replace: true });
+        await this.progress(this.tasks.getTask(task.id), "任务已由用户取消", { force: true, replace: true });
         return;
       }
       const summary = error instanceof Error ? error.message : String(error);
@@ -140,9 +140,9 @@ export class TaskRunner {
       await mkdir(workspace, { recursive: true });
       await mkdir(join(workspace, "logs"), { recursive: true });
       this.assertNotCanceled(task.id);
-      await this.progress(task, `Workspace ready: ${workspace}`);
+      await this.progress(task, `工作区已准备：${workspace}`);
 
-      this.tasks.updateStage(task.id, "cloning", "Cloning repositories");
+      this.tasks.updateStage(task.id, "cloning", "正在准备代码仓库");
       for (const repo of repoWorks) {
         this.assertNotCanceled(task.id);
         await prepareCachedRepoWorktree({
@@ -155,8 +155,8 @@ export class TaskRunner {
       }
 
       this.assertNotCanceled(task.id);
-      this.tasks.updateStage(task.id, "codex_running", "Running Codex");
-      await this.progress(this.tasks.getTask(task.id), "Codex is editing code");
+      this.tasks.updateStage(task.id, "codex_running", "Codex 正在修改代码");
+      await this.progress(this.tasks.getTask(task.id), "Codex 正在修改代码");
       const codexResult = await runCodex(this.env, this.tasks.getTask(task.id), repoWorks.map((item) => item.dir), workspace, {
         shouldCancel: () => this.isTaskCanceled(task.id),
         onProgress: (update) => this.progress(this.tasks.getTask(task.id), update.chunk)
@@ -187,32 +187,32 @@ export class TaskRunner {
         tokenBudgetChars: this.env.CODEX_CONTEXT_MAX_CHARS
       });
       if (codexResult.exitCode !== 0) {
-        throw new Error(`Codex failed with exit code ${codexResult.exitCode}`);
+        throw new Error(`Codex 执行失败，退出码：${codexResult.exitCode}`);
       }
 
-      this.tasks.updateStage(task.id, "testing", "Running tests");
+      this.tasks.updateStage(task.id, "testing", "正在运行测试");
       for (const repo of repoWorks) {
         this.assertNotCanceled(task.id);
         await runConfiguredCommand(repo.dir, repo.config.install, this.env);
         this.assertNotCanceled(task.id);
         const test = await runProjectChecks(repo.dir, repo.config.test ? [repo.config.test] : [], workspace);
         if (!test.ok) {
-          throw new Error(`Tests failed for ${repo.kind}:\n${test.summary}`);
+          throw new Error(`${repo.kind} 测试失败：\n${test.summary}`);
         }
       }
 
-      this.tasks.updateStage(task.id, "building", "Building projects");
+      this.tasks.updateStage(task.id, "building", "正在构建项目");
       for (const repo of repoWorks) {
         this.assertNotCanceled(task.id);
         await runConfiguredCommand(repo.dir, repo.config.build, this.env);
       }
 
       this.assertNotCanceled(task.id);
-      this.tasks.updateStage(task.id, "packaging", "Packaging artifacts");
+      this.tasks.updateStage(task.id, "packaging", "正在打包产物");
       const artifactPaths = repoWorks.flatMap((repo) => safeArtifactPaths(repo.dir, repo.config.artifact_paths));
       const artifact = await packageArtifacts(this.tasks.getTask(task.id), project, artifactPaths, workspace);
 
-      this.tasks.updateStage(task.id, "creating_pr", "Creating GitHub pull request");
+      this.tasks.updateStage(task.id, "creating_pr", "正在创建 GitHub Pull Request");
       const prUrls: string[] = [];
       let commitSha: string | undefined;
       for (const repo of repoWorks) {
@@ -229,7 +229,7 @@ export class TaskRunner {
           branch,
           commitSha: sha,
           artifactPath: artifact.path,
-          testSummary: "Configured checks passed"
+          testSummary: "已配置检查通过"
         });
         await pushBranch(repo.dir, branch);
         const owner = this.env.GITHUB_OWNER;
@@ -262,7 +262,7 @@ export class TaskRunner {
       }
 
       this.assertNotCanceled(task.id);
-      this.tasks.updateStage(task.id, "uploading", "Uploading artifact to Feishu");
+      this.tasks.updateStage(task.id, "uploading", "正在上传产物到飞书");
       const fileKey = await this.feishu.uploadFile(artifact.path);
       if (task.feishuChatId && fileKey) {
         await this.feishu.sendFile(task.feishuChatId, fileKey);
@@ -276,10 +276,10 @@ export class TaskRunner {
         githubBranch: branch,
         githubCommitSha: commitSha
       });
-      await this.progress(this.tasks.getTask(task.id), codexResult.summary || "Task succeeded", { force: true, replace: true });
+      await this.progress(this.tasks.getTask(task.id), codexResult.summary || "任务已完成", { force: true, replace: true });
     } catch (error) {
       if (error instanceof TaskCanceledError || this.isTaskCanceled(task.id)) {
-        await this.progress(this.tasks.getTask(task.id), "Task canceled by user", { force: true, replace: true });
+        await this.progress(this.tasks.getTask(task.id), "任务已由用户取消", { force: true, replace: true });
         return;
       }
       const summary = error instanceof Error ? error.message : String(error);
@@ -297,7 +297,7 @@ export class TaskRunner {
       repos.push({ kind: "backend", config: project.backend, dir: join(workspace, "backend") });
     }
     if (repos.length === 0) {
-      throw new Error(`No repository configured for scope ${task.scope}`);
+      throw new Error(`未配置适用于 ${task.scope} 范围的代码仓库`);
     }
     return repos;
   }
@@ -346,7 +346,7 @@ export class TaskRunner {
 
 class TaskCanceledError extends Error {
   constructor(taskId: string) {
-    super(`Task canceled: ${taskId}`);
+    super(`任务已取消：${taskId}`);
   }
 }
 
@@ -357,7 +357,7 @@ async function runConfiguredCommand(cwd: string, command: string | undefined, en
   const parsed = parseConfiguredCommand(command, env);
   const result = await execa(parsed.file, parsed.args, { cwd, all: true, reject: false });
   if (result.exitCode !== 0) {
-    throw new Error(`Command failed: ${command}\n${result.all ?? ""}`);
+    throw new Error(`命令执行失败：${command}\n${result.all ?? ""}`);
   }
 }
 
@@ -432,29 +432,29 @@ async function assertReposClean(repoWorks: RepoWork[]): Promise<void> {
   for (const repo of repoWorks) {
     const result = await execa("git", ["status", "--porcelain"], { cwd: repo.dir, all: true, reject: false });
     if (result.exitCode !== 0) {
-      throw new Error(`Failed to inspect ${repo.kind} repository after planning:\n${result.all ?? ""}`);
+      throw new Error(`方案生成后检查 ${repo.kind} 仓库失败：\n${result.all ?? ""}`);
     }
     if ((result.stdout ?? "").trim()) {
-      throw new Error(`Plan mode modified files in ${repo.kind}; refusing to continue.\n${result.stdout}`);
+      throw new Error(`方案模式不应修改文件，但 ${repo.kind} 仓库出现改动，已停止继续处理。\n${result.stdout}`);
     }
   }
 }
 
 function buildPrBody(task: TaskRecord, repoKind: string, artifactName: string): string {
   return [
-    `Feishu task: ${task.id}`,
-    `Project: ${task.projectName}`,
-    `Repository: ${repoKind}`,
-    `Mode: ${task.executionMode}`,
-    `Type: ${task.taskType}`,
-    `Scope: ${task.scope}`,
+    `飞书任务：${task.id}`,
+    `项目：${task.projectName}`,
+    `仓库：${repoKind}`,
+    `模式：${task.executionMode}`,
+    `类型：${task.taskType}`,
+    `范围：${task.scope}`,
     "",
-    "Request:",
+    "需求：",
     task.parsedDescription,
     "",
-    `Artifact: ${artifactName}`,
+    `产物：${artifactName}`,
     "",
-    "Generated by Feishu Codex Orchestrator."
+    "由飞书 Codex 编排服务生成。"
   ].join("\n");
 }
 
@@ -463,9 +463,20 @@ function sanitizeProgress(value: string): string {
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
     .split("\n")
-    .map((line) => line.trimEnd())
+    .map((line) => localizeProgressLine(line.trimEnd()))
     .filter((line) => line.trim())
     .join("\n");
+}
+
+function localizeProgressLine(line: string): string {
+  return line
+    .replace(/^Workspace ready:/, "工作区已准备：")
+    .replace(/^tokens used$/, "消耗 token")
+    .replace(
+      /^ERROR codex_core::session: failed to record rollout items: thread ([^\s]+) not found$/,
+      "错误 Codex 会话记录失败：线程 $1 不存在"
+    )
+    .replace(/^failed to record rollout items: thread ([^\s]+) not found$/, "Codex 会话记录失败：线程 $1 不存在");
 }
 
 function tail(value: string, max: number): string {

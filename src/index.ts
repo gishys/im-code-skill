@@ -58,12 +58,26 @@ function startWorkerLoop(queue: SqliteQueue, runner: TaskRunner): void {
         break;
       }
       active += 1;
+      const heartbeat = setInterval(() => {
+        try {
+          queue.heartbeat(task.id, env.WORKER_ID);
+        } catch (error) {
+          console.warn(
+            JSON.stringify({
+              taskId: task.id,
+              err: error instanceof Error ? error.message : String(error),
+              msg: "Failed to update worker heartbeat"
+            })
+          );
+        }
+      }, env.TASK_HEARTBEAT_SECONDS * 1000);
       runner
         .run(task)
         .catch((error) => {
           tasks.markFailed(task.id, "worker", error instanceof Error ? error.message : String(error));
         })
         .finally(() => {
+          clearInterval(heartbeat);
           active -= 1;
         });
     }

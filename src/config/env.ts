@@ -46,7 +46,12 @@ const envSchema = z.object({
   MAX_ATTACHMENT_BYTES: z.coerce.number().int().positive().default(50 * 1024 * 1024),
   CONFIG_COMMAND_ALLOWLIST: z.string().default("npm,npm.cmd,pnpm,yarn,yarn.cmd,corepack"),
   CODEX_COMMAND: z.string().default("codex"),
+  CODEX_PROXY_URL: optionalNonEmptyString,
+  CODEX_SANDBOX_MODE: z.enum(["read-only", "workspace-write", "danger-full-access"]).default("danger-full-access"),
+  CODEX_BYPASS_APPROVALS_AND_SANDBOX: z.coerce.boolean().default(false),
+  CODEX_JSON_EVENTS_ENABLED: z.coerce.boolean().default(true),
   CODEX_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(1800),
+  CODEX_STARTUP_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(300),
   CODEX_HISTORY_ENABLED: z.coerce.boolean().default(true),
   CODEX_CONTEXT_MAX_CHARS: z.coerce.number().int().positive().default(24000)
 }).superRefine((env, context) => {

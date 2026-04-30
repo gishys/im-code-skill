@@ -1059,6 +1059,76 @@ describe("Feishu card actions", () => {
     expect(row).toEqual({ execution_mode: "agent", status: "queued", plan_summary: "Plan body" });
   });
 
+  it("queues a new plan revision from plan feedback", async () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(schemaSql);
+    const tasks = new TaskService(db);
+    const task = tasks.createTask({
+      parsed: {
+        projectName: "demo-app",
+        executionMode: "plan",
+        taskType: "bug",
+        scope: "frontend",
+        description: "fix empty state"
+      },
+      rawText: "raw",
+      autoApproved: true
+    });
+    tasks.addPlanVersion({
+      taskId: task.id,
+      threadId: task.threadId,
+      planPath: "/tmp/plan-v1.md",
+      summary: "Plan v1"
+    });
+    tasks.markPlanReady(task.id, { planSummary: "Plan v1" });
+    const app = createApp({
+      env: loadEnv({
+        PORT: "3005",
+        WORKER_ENABLED: "false",
+        DATABASE_PATH: ":memory:"
+      }),
+      projects,
+      tasks,
+      feishu: fakeFeishu,
+      assets: new AssetService(db, fakeFeishu)
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/feishu/actions",
+      payload: {
+        event: {
+          open_chat_id: "oc_group",
+          open_message_id: "om_form",
+          operator: { open_id: "ou_a" },
+          action: {
+            form_value: {
+              planFeedback: "Add a rollback step and check backend migrations."
+            },
+            value: { action: "revise_plan", taskId: task.id }
+          }
+        }
+      }
+    });
+
+    const row = db.prepare("SELECT execution_mode, status, current_stage, parsed_description FROM tasks WHERE id = ?").get(task.id) as {
+      execution_mode: string;
+      status: string;
+      current_stage: string;
+      parsed_description: string;
+    };
+    const message = db.prepare("SELECT message_type, content FROM task_messages WHERE task_id = ? ORDER BY created_at DESC LIMIT 1").get(task.id) as {
+      message_type: string;
+      content: string;
+    };
+    expect(response.statusCode).toBe(200);
+    expect(row.execution_mode).toBe("plan");
+    expect(row.status).toBe("queued");
+    expect(row.current_stage).toBe("queued");
+    expect(row.parsed_description).toContain("Add a rollback step");
+    expect(message).toEqual({ message_type: "revise_plan", content: "Add a rollback step and check backend migrations." });
+  });
+
   it("requeues a failed task from the retry card action", async () => {
     const db = new DatabaseSync(":memory:");
     db.exec(schemaSql);
@@ -1110,6 +1180,72 @@ describe("Feishu card actions", () => {
     };
     expect(response.statusCode).toBe(200);
     expect(row).toEqual({ status: "queued", current_stage: "queued", failure_stage: null, failure_summary: null });
+  });
+
+  it("continues a failed task with extra context and requeues it", async () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(schemaSql);
+    const tasks = new TaskService(db);
+    const task = tasks.createTask({
+      parsed: {
+        projectName: "demo-app",
+        executionMode: "agent",
+        taskType: "bug",
+        scope: "frontend",
+        description: "fix clone failure"
+      },
+      rawText: "raw",
+      autoApproved: true
+    });
+    tasks.markFailed(task.id, "cloning", "clone failed");
+    const app = createApp({
+      env: loadEnv({
+        PORT: "3005",
+        WORKER_ENABLED: "false",
+        DATABASE_PATH: ":memory:"
+      }),
+      projects,
+      tasks,
+      feishu: fakeFeishu,
+      assets: new AssetService(db, fakeFeishu)
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/feishu/actions",
+      payload: {
+        event: {
+          open_chat_id: "oc_group",
+          open_message_id: "om_failed",
+          operator: { open_id: "ou_a" },
+          action: {
+            form_value: {
+              description: "The local worker has been authorized; reuse the existing worktree."
+            },
+            value: { action: "continue_task", taskId: task.id }
+          }
+        }
+      }
+    });
+
+    const row = db.prepare("SELECT status, current_stage, failure_stage, failure_summary, parsed_description FROM tasks WHERE id = ?").get(task.id) as {
+      status: string;
+      current_stage: string;
+      failure_stage: string | null;
+      failure_summary: string | null;
+      parsed_description: string;
+    };
+    const message = db.prepare("SELECT message_type, content FROM task_messages WHERE task_id = ? ORDER BY created_at DESC LIMIT 1").get(task.id) as {
+      message_type: string;
+      content: string;
+    };
+    expect(response.statusCode).toBe(200);
+    expect(row.status).toBe("queued");
+    expect(row.current_stage).toBe("queued");
+    expect(row.failure_stage).toBeNull();
+    expect(row.failure_summary).toBeNull();
+    expect(row.parsed_description).toContain("reuse the existing worktree");
+    expect(message).toEqual({ message_type: "continue_task", content: "The local worker has been authorized; reuse the existing worktree." });
   });
 });
 

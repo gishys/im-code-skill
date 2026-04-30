@@ -141,6 +141,24 @@ describe("buildTaskFormCard", () => {
     expect(actionBlock?.actions?.some((button) => button.value?.action === "approve")).toBe(false);
   });
 
+  it("renders plan revision feedback controls for plan-ready tasks", () => {
+    const card = buildTaskCard(taskRecord({ executionMode: "plan", status: "plan_ready", planSummary: "Plan body" })) as {
+      elements: Array<{
+        tag: string;
+        name?: string;
+        text?: { content?: string };
+        elements?: Array<{ name?: string; value?: { action?: string }; text?: { content?: string }; label?: { content?: string } }>;
+      }>;
+    };
+    const reviewText = card.elements.find((element) => element.tag === "div" && element.text?.content?.includes("方案确认"));
+    const form = card.elements.find((element) => element.tag === "form" && element.name === "plan_review_form");
+    const reviseButton = form?.elements?.find((element) => element.value?.action === "revise_plan");
+
+    expect(reviewText?.text?.content).toContain("修改意见");
+    expect(form?.elements?.some((element) => element.name === "planFeedback")).toBe(true);
+    expect(reviseButton?.text?.content).toBe("修改方案");
+  });
+
   it("allows cancellation while a task is executing", () => {
     const card = buildTaskCard(taskRecord({ status: "running", currentStage: "codex_running" })) as {
       elements: Array<{ tag: string; actions?: Array<{ value?: { action?: string } }> }>;
@@ -161,11 +179,14 @@ describe("buildTaskFormCard", () => {
 
   it("shows a retry action after a task fails", () => {
     const card = buildTaskCard(taskRecord({ status: "failed", currentStage: "failed", failureSummary: "clone failed" })) as {
-      elements: Array<{ tag: string; actions?: Array<{ value?: { action?: string } }> }>;
+      elements: Array<{ tag: string; name?: string; actions?: Array<{ value?: { action?: string } }>; elements?: Array<{ name?: string; value?: { action?: string } }> }>;
     };
     const actions = card.elements.find((element) => element.tag === "action")?.actions ?? [];
+    const continueForm = card.elements.find((element) => element.tag === "form" && element.name === "failed_continue_form");
 
     expect(actions.map((button) => button.value?.action)).toEqual(["status", "retry"]);
+    expect(continueForm?.elements?.some((element) => element.name === "description")).toBe(true);
+    expect(continueForm?.elements?.some((element) => element.value?.action === "continue_task")).toBe(true);
   });
 });
 

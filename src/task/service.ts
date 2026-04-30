@@ -203,7 +203,7 @@ export class TaskService {
         timestamp
       );
 
-    this.addEvent(id, "task_created", currentStage, "Task created");
+    this.addEvent(id, "task_created", currentStage, "任务已创建");
     this.addTaskMessage({
       threadId,
       taskId: id,
@@ -230,7 +230,7 @@ export class TaskService {
   getThread(id: string): DeliveryThreadRecord {
     const row = this.db.prepare("SELECT * FROM delivery_threads WHERE id = ?").get(id) as Record<string, unknown> | undefined;
     if (!row) {
-      throw new Error(`Thread not found: ${id}`);
+      throw new Error(`未找到交付线程：${id}`);
     }
     return rowToThread(row);
   }
@@ -243,7 +243,7 @@ export class TaskService {
   getTask(id: string): TaskRecord {
     const row = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Record<string, unknown> | undefined;
     if (!row) {
-      throw new Error(`Task not found: ${id}`);
+      throw new Error(`未找到任务：${id}`);
     }
     return rowToTask(row);
   }
@@ -273,7 +273,7 @@ export class TaskService {
     this.db
       .prepare("INSERT INTO approvals (id, task_id, action, feishu_user_id, created_at) VALUES (?, ?, ?, ?, ?)")
       .run(randomUUID(), id, "approved", feishuUserId ?? null, timestamp);
-    this.addEvent(id, "approved", "queued", "Task approved by user");
+    this.addEvent(id, "approved", "queued", "用户已确认执行");
     return this.getTask(id);
   }
 
@@ -293,7 +293,7 @@ export class TaskService {
     this.db
       .prepare("INSERT INTO approvals (id, task_id, action, feishu_user_id, created_at) VALUES (?, ?, ?, ?, ?)")
       .run(randomUUID(), id, "approved_plan_as_agent", feishuUserId ?? null, timestamp);
-    this.addEvent(id, "approved_plan_as_agent", "queued", "Plan approved for agent execution");
+    this.addEvent(id, "approved_plan_as_agent", "queued", "方案已确认，转入 Agent 执行");
     return this.getTask(id);
   }
 
@@ -312,7 +312,7 @@ export class TaskService {
     this.db
       .prepare("INSERT INTO approvals (id, task_id, action, feishu_user_id, created_at) VALUES (?, ?, ?, ?, ?)")
       .run(randomUUID(), id, "canceled", feishuUserId ?? null, timestamp);
-    this.addEvent(id, "canceled", "failed", "Task canceled by user");
+    this.addEvent(id, "canceled", "failed", "任务已由用户取消");
     return this.getTask(id);
   }
 
@@ -333,7 +333,7 @@ export class TaskService {
     this.db
       .prepare("INSERT INTO approvals (id, task_id, action, feishu_user_id, created_at) VALUES (?, ?, ?, ?, ?)")
       .run(randomUUID(), id, "retry", feishuUserId ?? null, timestamp);
-    this.addEvent(id, "retry", "queued", "Task queued for retry");
+    this.addEvent(id, "retry", "queued", "任务已重新加入队列");
     return this.getTask(id);
   }
 
@@ -366,7 +366,7 @@ export class TaskService {
     if (task.threadId && update.githubPrUrl) {
       this.db.prepare("UPDATE delivery_threads SET status = 'delivered', updated_at = ? WHERE id = ?").run(timestamp, task.threadId);
     }
-    this.addEvent(id, "succeeded", "done", "Task succeeded");
+    this.addEvent(id, "succeeded", "done", "任务已完成");
   }
 
   markPlanReady(id: string, update: { planSummary: string; planArtifactPath?: string }): void {
@@ -378,7 +378,7 @@ export class TaskService {
          updated_at = ?, finished_at = ? WHERE id = ?`
       )
       .run(update.planSummary, update.planArtifactPath ?? null, timestamp, timestamp, id);
-    this.addEvent(id, "plan_ready", "done", "Plan is ready");
+    this.addEvent(id, "plan_ready", "done", "方案已就绪");
   }
 
   addTaskMessage(input: { threadId?: string | null; taskId?: string | null; role: string; messageType: string; content: string; metadata?: unknown }): void {
@@ -443,7 +443,7 @@ export class TaskService {
   getCodexRun(id: string): CodexRunRecord {
     const row = this.db.prepare("SELECT * FROM codex_runs WHERE id = ?").get(id) as Record<string, unknown> | undefined;
     if (!row) {
-      throw new Error(`Codex run not found: ${id}`);
+      throw new Error(`未找到 Codex 运行记录：${id}`);
     }
     return rowToCodexRun(row);
   }
@@ -470,10 +470,42 @@ export class TaskService {
     return this.approvePlanAsAgent(taskId, feishuUserId);
   }
 
+  requestPlanRevision(taskId: string, input: { feedback: string; feishuUserId?: string }): TaskRecord {
+    const task = this.getTask(taskId);
+    if (task.executionMode !== "plan" || task.status !== "plan_ready") {
+      return task;
+    }
+    const timestamp = now();
+    const feedback = input.feedback.trim();
+    const nextDescription = appendPlanFeedback(task.parsedDescription, feedback);
+    this.db
+      .prepare(
+        `UPDATE tasks
+         SET status = 'queued', current_stage = 'queued', failure_stage = NULL, failure_summary = NULL,
+             locked_by = NULL, locked_at = NULL, heartbeat_at = NULL, started_at = NULL,
+             finished_at = NULL, parsed_description = ?, updated_at = ?
+         WHERE id = ? AND execution_mode = 'plan' AND status = 'plan_ready'`
+      )
+      .run(nextDescription, timestamp, taskId);
+    this.db
+      .prepare("INSERT INTO approvals (id, task_id, action, feishu_user_id, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(randomUUID(), taskId, "revise_plan", input.feishuUserId ?? null, feedback, timestamp);
+    this.addTaskMessage({
+      threadId: task.threadId,
+      taskId,
+      role: "user",
+      messageType: "revise_plan",
+      content: feedback,
+      metadata: { previousPlanVersionId: task.currentPlanVersionId }
+    });
+    this.addEvent(taskId, "revise_plan", "queued", "已请求修改方案", { previousPlanVersionId: task.currentPlanVersionId });
+    return this.getTask(taskId);
+  }
+
   getPlanVersion(id: string): PlanVersionRecord {
     const row = this.db.prepare("SELECT * FROM plan_versions WHERE id = ?").get(id) as Record<string, unknown> | undefined;
     if (!row) {
-      throw new Error(`Plan version not found: ${id}`);
+      throw new Error(`未找到方案版本：${id}`);
     }
     return rowToPlanVersion(row);
   }
@@ -520,7 +552,7 @@ export class TaskService {
   getChangeset(id: string): ChangesetRecord {
     const row = this.db.prepare("SELECT * FROM changesets WHERE id = ?").get(id) as Record<string, unknown> | undefined;
     if (!row) {
-      throw new Error(`Changeset not found: ${id}`);
+      throw new Error(`未找到变更集：${id}`);
     }
     return rowToChangeset(row);
   }
@@ -552,7 +584,7 @@ export class TaskService {
   getPullRequest(id: string): PullRequestRecord {
     const row = this.db.prepare("SELECT * FROM pull_requests WHERE id = ?").get(id) as Record<string, unknown> | undefined;
     if (!row) {
-      throw new Error(`Pull request not found: ${id}`);
+      throw new Error(`未找到 Pull Request：${id}`);
     }
     return rowToPullRequest(row);
   }
@@ -620,7 +652,7 @@ export class TaskService {
     this.db
       .prepare("UPDATE tasks SET status = 'queued', current_stage = 'queued', updated_at = ? WHERE id = ? AND status = 'created'")
       .run(timestamp, id);
-    this.addEvent(id, "queued", "queued", "Task queued");
+    this.addEvent(id, "queued", "queued", "任务已加入队列");
     return this.getTask(id);
   }
 
@@ -642,4 +674,9 @@ export class TaskService {
 
 function tail(value: string, max: number): string {
   return value.length <= max ? value : value.slice(value.length - max);
+}
+
+function appendPlanFeedback(description: string, feedback: string): string {
+  const header = `方案修改意见（${now()}）：`;
+  return [description.trim(), `${header}\n${feedback}`].filter(Boolean).join("\n\n");
 }

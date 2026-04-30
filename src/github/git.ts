@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { access, mkdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { access, mkdir, readdir, rmdir } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { execa } from "execa";
 
 export interface GitRepoResult {
@@ -24,17 +24,56 @@ export async function prepareCachedRepoWorktree(options: {
   allowStaleCacheOnFetchFailure?: boolean;
 }): Promise<void> {
   const repo = normalizeRepoUrl(options.repo);
-  const cacheDir = repoCacheDir(options.cacheRoot, repo);
+  const cacheDir = repoCacheDir(resolve(options.cacheRoot), repo);
+  const destination = resolve(options.destination);
   await withCacheLock(cacheDir, async () => {
     await ensureRepoCache(repo, options.branch, cacheDir, options.allowStaleCacheOnFetchFailure ?? false);
   });
 
-  await mkdir(dirname(options.destination), { recursive: true });
+  await mkdir(dirname(destination), { recursive: true });
   const target = `origin/${options.branch}`;
+  if (await destinationExists(destination)) {
+    if (await isGitRepository(destination)) {
+      await reuseExistingWorktree(destination, target, options.worktreeBranch);
+      return;
+    }
+    if (await isEmptyDirectory(destination)) {
+      await rmdir(destination);
+    } else {
+      throw new Error(`Git worktree target already exists and is not a Git repository: ${destination}`);
+    }
+  }
   const args = options.worktreeBranch
-    ? ["worktree", "add", "-B", options.worktreeBranch, options.destination, target]
-    : ["worktree", "add", "--detach", options.destination, target];
+    ? ["worktree", "add", "-B", options.worktreeBranch, destination, target]
+    : ["worktree", "add", "--detach", destination, target];
   await runGit(args, { cwd: cacheDir });
+}
+
+async function destinationExists(destination: string): Promise<boolean> {
+  try {
+    await access(destination);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function isEmptyDirectory(destination: string): Promise<boolean> {
+  try {
+    return (await readdir(destination)).length === 0;
+  } catch {
+    return false;
+  }
+}
+
+async function reuseExistingWorktree(destination: string, target: string, branch?: string): Promise<void> {
+  if (branch) {
+    await runGit(["checkout", "-B", branch, target], { cwd: destination });
+  } else {
+    await runGit(["checkout", "--detach", target], { cwd: destination });
+  }
+  await runGit(["reset", "--hard", target], { cwd: destination });
+  await runGit(["clean", "-fd"], { cwd: destination });
 }
 
 async function ensureRepoCache(repo: string, branch: string, cacheDir: string, allowStaleCacheOnFetchFailure: boolean): Promise<void> {
@@ -129,7 +168,7 @@ function buildGitError(args: string[], error: unknown): Error {
   if (message.includes("repository not found") || message.includes("not found")) {
     return new Error(`Git 仓库不存在或当前凭据无权访问。请检查项目配置中的仓库地址。\n命令：${command}\n仓库：${repo ?? "unknown"}`);
   }
-  if (message.includes("%22") || message.includes("\"")) {
+  if (message.includes("%22") || (repo ? /["'`]/.test(repo) : false)) {
     return new Error(`Git 仓库地址疑似包含多余引号，请检查项目配置。\n命令：${command}\n仓库：${repo ?? "unknown"}`);
   }
   return new Error(`Git 命令执行失败。\n命令：${command}\n${output}`);

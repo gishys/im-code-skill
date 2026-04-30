@@ -61,36 +61,36 @@ export function createApp(input: {
 
   app.get("/tasks/:id", async (request, reply) => {
     if (!authorizeInternalApi(input.env, request.headers)) {
-      return reply.code(401).send({ error: "Unauthorized" });
+      return reply.code(401).send({ error: "未授权" });
     }
     const id = (request.params as { id: string }).id;
     const task = input.tasks.tryGetTask(id);
     if (!task) {
-      return reply.code(404).send({ error: "Task not found" });
+      return reply.code(404).send({ error: "未找到任务" });
     }
     return input.tasks.getTaskDetails(id);
   });
 
   app.get("/threads/:id", async (request, reply) => {
     if (!authorizeInternalApi(input.env, request.headers)) {
-      return reply.code(401).send({ error: "Unauthorized" });
+      return reply.code(401).send({ error: "未授权" });
     }
     const id = (request.params as { id: string }).id;
     const thread = input.tasks.tryGetThread(id);
     if (!thread) {
-      return reply.code(404).send({ error: "Thread not found" });
+      return reply.code(404).send({ error: "未找到交付线程" });
     }
     return input.tasks.getThreadDetails(id);
   });
 
   app.get("/changesets/:id", async (request, reply) => {
     if (!authorizeInternalApi(input.env, request.headers)) {
-      return reply.code(401).send({ error: "Unauthorized" });
+      return reply.code(401).send({ error: "未授权" });
     }
     const id = (request.params as { id: string }).id;
     const changeset = input.tasks.tryGetChangeset(id);
     if (!changeset) {
-      return reply.code(404).send({ error: "Changeset not found" });
+      return reply.code(404).send({ error: "未找到变更集" });
     }
     return input.tasks.getChangesetDetails(id);
   });
@@ -127,7 +127,7 @@ export function createApp(input: {
 
     const claimedDraft = input.assets.claimDraftSubmission(draft.id, token);
     if (!claimedDraft) {
-      return reply.code(403).send({ ok: false, error: "Form was already submitted or expired" });
+      return reply.code(403).send({ ok: false, error: "表单已提交或已过期" });
     }
 
     try {
@@ -156,7 +156,7 @@ export function createApp(input: {
     const token = getToken(request.query);
     const draft = input.assets.verifyDraftFormToken(draftId, token);
     if (!draft) {
-      return reply.code(403).send({ ok: false, error: "Form is expired or unavailable" });
+      return reply.code(403).send({ ok: false, error: "表单已过期或不可用" });
     }
     return {
       ok: true,
@@ -191,11 +191,11 @@ export function createApp(input: {
     const body = unwrapFeishuRequest(input.env, request.body as Record<string, unknown>);
     if (!body) {
       request.log.warn(feishuBodyDebug(input.env, request.body, request.headers["content-type"]), "Rejected unreadable Feishu event");
-      return reply.code(400).send({ error: "Invalid encrypted payload" });
+      return reply.code(400).send({ error: "加密载荷无效" });
     }
     if (!verifyFeishuRequest(input.env, body)) {
       request.log.warn("Rejected unauthenticated Feishu event");
-      return reply.code(401).send({ error: "Unauthorized" });
+      return reply.code(401).send({ error: "未授权" });
     }
     if (body.type === "url_verification") {
       return { challenge: body.challenge };
@@ -204,7 +204,7 @@ export function createApp(input: {
     const cardAction = parseFeishuActionEvent(body);
     if (cardAction) {
       if (!isAllowedFeishuChat(input.env, cardAction.chatId)) {
-        return reply.code(403).send({ error: "Chat is not allowed" });
+        return reply.code(403).send({ error: "当前会话不在允许范围内" });
       }
       return handleCardAction(cardAction, input, reply);
     }
@@ -216,7 +216,7 @@ export function createApp(input: {
     }
     if (!isAllowedFeishuChat(input.env, event.chatId)) {
       request.log.warn({ chatId: event.chatId }, "Rejected Feishu event from disallowed chat");
-      return reply.code(403).send({ error: "Chat is not allowed" });
+      return reply.code(403).send({ error: "当前会话不在允许范围内" });
     }
 
     if (!event.text.trim() && event.assets.length > 0) {
@@ -278,11 +278,11 @@ export function createApp(input: {
     const body = unwrapFeishuRequest(input.env, request.body as Record<string, unknown>);
     if (!body) {
       request.log.warn(feishuBodyDebug(input.env, request.body, request.headers["content-type"]), "Rejected unreadable Feishu action");
-      return reply.code(400).send({ error: "Invalid encrypted payload" });
+      return reply.code(400).send({ error: "加密载荷无效" });
     }
     if (!verifyFeishuRequest(input.env, body)) {
       request.log.warn("Rejected unauthenticated Feishu action");
-      return reply.code(401).send({ error: "Unauthorized" });
+      return reply.code(401).send({ error: "未授权" });
     }
     if (body.type === "url_verification" || body.challenge) {
       return { challenge: body.challenge };
@@ -290,10 +290,10 @@ export function createApp(input: {
 
     const action = parseFeishuActionEvent(body);
     if (!action) {
-      return reply.code(400).send({ error: "Invalid action payload" });
+      return reply.code(400).send({ error: "操作载荷无效" });
     }
     if (!isAllowedFeishuChat(input.env, action.chatId)) {
-      return reply.code(403).send({ error: "Chat is not allowed" });
+      return reply.code(403).send({ error: "当前会话不在允许范围内" });
     }
     request.log.info(
       {
@@ -393,7 +393,7 @@ async function handleCardAction(
 
     const claimedDraft = action.draftId ? input.assets.claimDraftSubmission(action.draftId) : undefined;
     if (action.draftId && !claimedDraft) {
-      const message = "Form was already submitted or expired";
+      const message = "表单已提交或已过期";
       return updateCurrentCardOrRespond(input, action, buildTaskFormCard(input.projects, formCardInput(input, action, message)), message, "warning");
     }
 
@@ -421,47 +421,90 @@ async function handleCardAction(
   }
 
   if (!action.taskId) {
-    return reply.code(400).send({ error: "Missing taskId" });
+    return reply.code(400).send({ error: "缺少任务 ID" });
   }
   const actionTask = input.tasks.getTask(action.taskId);
   if (!isAuthorizedTaskAction(actionTask, action)) {
-    return reply.code(403).send({ error: "Action is not authorized for this task" });
+    return reply.code(403).send({ error: "无权操作该任务" });
   }
   if (action.action === "approve") {
     const task = actionTask;
     if (task.status !== "waiting_approval") {
-      return cardActionResponse(buildTaskCard(task), `任务当前为 ${task.status}，无需再次确认执行`, "info");
+      return updateTaskCardAndRespond(input, action, buildTaskCard(task), `任务当前为 ${task.status}，无需再次确认执行`, "info");
     }
-    return cardActionResponse(buildTaskCard(input.tasks.approveTask(action.taskId, action.userId)), "已确认执行");
+    return updateTaskCardAndRespond(input, action, buildTaskCard(input.tasks.approveTask(action.taskId, action.userId)), "已确认执行");
   }
   if (action.action === "approve_plan_as_agent") {
     const task = actionTask;
     if (task.executionMode !== "plan" || task.status !== "plan_ready") {
-      return cardActionResponse(buildTaskCard(task), `任务当前为 ${task.status}，暂不能转为 Agent 执行`, "warning");
+      return updateTaskCardAndRespond(input, action, buildTaskCard(task), `任务当前为 ${task.status}，暂不能转为 Agent 执行`, "warning");
     }
-    return cardActionResponse(buildTaskCard(input.tasks.approvePlanAsAgent(action.taskId, action.userId)), "已转为 Agent 执行");
+    return updateTaskCardAndRespond(input, action, buildTaskCard(input.tasks.approvePlanAsAgent(action.taskId, action.userId)), "已转为 Agent 执行");
   }
   if (action.action === "cancel") {
     const task = actionTask;
     if (!["waiting_approval", "queued", "running", "plan_ready", "created"].includes(task.status)) {
-      return cardActionResponse(buildTaskCard(task), `任务当前为 ${task.status}，不能取消`, "warning");
+      return updateTaskCardAndRespond(input, action, buildTaskCard(task), `任务当前为 ${task.status}，不能取消`, "warning");
     }
-    return cardActionResponse(buildTaskCard(input.tasks.cancelTask(action.taskId, action.userId)), "已取消任务");
+    return updateTaskCardAndRespond(input, action, buildTaskCard(input.tasks.cancelTask(action.taskId, action.userId)), "已取消任务");
   }
   if (action.action === "status") {
-    return cardActionResponse(buildTaskCard(input.tasks.getTask(action.taskId)), "已刷新状态");
+    return updateTaskCardAndRespond(input, action, buildTaskCard(input.tasks.getTask(action.taskId)), "已刷新状态");
   }
   if (action.action === "approve_plan") {
-    return cardActionResponse(buildTaskCard(input.tasks.approveLatestPlan(action.taskId, action.userId)), "Latest plan approved for execution");
+    return updateTaskCardAndRespond(input, action, buildTaskCard(input.tasks.approveLatestPlan(action.taskId, action.userId)), "已确认最新方案并转入执行");
+  }
+  if (action.action === "revise_plan") {
+    const task = actionTask;
+    const feedback = firstNonEmpty(action.formValues.planFeedback, action.formValues.feedback, action.formValues.description);
+    if (task.executionMode !== "plan" || task.status !== "plan_ready") {
+      return updateTaskCardAndRespond(input, action, buildTaskCard(task), `任务当前为 ${task.status}，只有方案已就绪时才能提交修改意见。`, "warning");
+    }
+    if (!feedback) {
+      return updateTaskCardAndRespond(input, action, buildTaskCard(task), "请先填写方案修改意见，再提交。", "warning");
+    }
+    const revisedTask = input.tasks.requestPlanRevision(action.taskId, { feedback, feishuUserId: action.userId });
+    return updateTaskCardAndRespond(input, action, buildTaskCard(revisedTask), "方案修改请求已排队，Codex 将生成新的方案版本。");
+  }
+  if (action.action === "continue_task") {
+    const task = actionTask;
+    const feedback = firstNonEmpty(action.formValues.description, action.formValues.feedback);
+    if (!["failed", "interrupted"].includes(task.status)) {
+      input.tasks.addTaskMessage({
+        threadId: task.threadId,
+        taskId: task.id,
+        role: "user",
+        messageType: action.action,
+        content: feedback || action.action,
+        metadata: { formValues: action.formValues }
+      });
+      return updateTaskCardAndRespond(input, action, buildTaskCard(task), "补充信息已记录");
+    }
+    if (!feedback) {
+      return updateTaskCardAndRespond(input, action, buildTaskCard(task), "请先填写补充说明，再继续会话。", "warning");
+    }
+    input.tasks.addTaskMessage({
+      threadId: task.threadId,
+      taskId: task.id,
+      role: "user",
+      messageType: action.action,
+      content: feedback,
+      metadata: { formValues: action.formValues }
+    });
+    input.tasks.updateTaskInputText(action.taskId, {
+      rawText: task.rawText,
+      parsedDescription: appendContinuationFeedback(task.parsedDescription, feedback)
+    });
+    return updateTaskCardAndRespond(input, action, buildTaskCard(input.tasks.retryTask(action.taskId, action.userId)), "已带着补充说明重新加入执行队列");
   }
   if (action.action === "retry") {
     const task = actionTask;
     if (!["failed", "interrupted"].includes(task.status)) {
-      return cardActionResponse(buildTaskCard(task), `任务当前为 ${task.status}，无需再次执行`, "info");
+      return updateTaskCardAndRespond(input, action, buildTaskCard(task), `任务当前为 ${task.status}，无需再次执行`, "info");
     }
-    return cardActionResponse(buildTaskCard(input.tasks.retryTask(action.taskId, action.userId)), "已重新加入执行队列");
+    return updateTaskCardAndRespond(input, action, buildTaskCard(input.tasks.retryTask(action.taskId, action.userId)), "已重新加入执行队列");
   }
-  if (["revise_plan", "continue_task", "add_followup_task", "create_pr", "split_pr", "view_history"].includes(action.action)) {
+  if (["add_followup_task", "create_pr", "split_pr", "view_history"].includes(action.action)) {
     const task = actionTask;
     input.tasks.addTaskMessage({
       threadId: task.threadId,
@@ -471,9 +514,9 @@ async function handleCardAction(
       content: action.formValues.description || action.formValues.feedback || action.action,
       metadata: { formValues: action.formValues }
     });
-    return cardActionResponse(buildTaskCard(task), `${action.action} recorded`);
+    return cardActionResponse(buildTaskCard(task), "操作已记录");
   }
-  return reply.code(409).send({ error: "Retry is not implemented in MVP", taskId: action.taskId });
+  return reply.code(409).send({ error: "当前版本暂不支持重试该操作", taskId: action.taskId });
 }
 
 async function sendNewTaskForm(
@@ -979,6 +1022,23 @@ async function updateCurrentCardOrRespond(
   return toastOnly(content, type);
 }
 
+async function updateTaskCardAndRespond(
+  input: { feishu: FeishuClient },
+  action: FeishuActionEvent,
+  card: object,
+  content: string,
+  type: "success" | "warning" | "info" = "success"
+) {
+  if (action.messageId) {
+    try {
+      await input.feishu.updateTaskCard(action.messageId, card);
+    } catch (error) {
+      console.warn("Failed to update Feishu card in action callback", error);
+    }
+  }
+  return cardActionResponse(card, content, type);
+}
+
 function toastOnly(content: string, type: "success" | "warning" | "info" = "success") {
   return {
     toast: {
@@ -1062,6 +1122,14 @@ function isAuthorizedTaskAction(task: TaskRecord, action: FeishuActionEvent): bo
 
 function firstHeader(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
+}
+
+function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
+  return values.map((value) => value?.trim()).find((value): value is string => Boolean(value));
+}
+
+function appendContinuationFeedback(description: string, feedback: string): string {
+  return [description.trim(), `继续会话补充（${new Date().toISOString()}）：\n${feedback.trim()}`].filter(Boolean).join("\n\n");
 }
 
 function safeEqual(left?: string, right?: string): boolean {
