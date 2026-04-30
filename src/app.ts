@@ -814,7 +814,10 @@ async function refreshAssets() {
   }
 }
 let fieldVisibilityTimer;
-function updateViewport(options = {}) {
+let fieldVisibilityTimers = [];
+let focusedField = null;
+let focusedFieldAdjusted = false;
+function updateViewport() {
   const viewport = window.visualViewport;
   const keyboardOpen = Boolean(viewport && window.innerHeight - viewport.height > 80);
   const heightSource = keyboardOpen ? window.innerHeight : (viewport ? viewport.height : window.innerHeight);
@@ -825,23 +828,41 @@ function updateViewport(options = {}) {
   const bottomInset = viewport ? Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop) : 0;
   document.documentElement.style.setProperty("--keyboard-inset", bottomInset + "px");
   document.documentElement.classList.toggle("keyboard-open", keyboardOpen);
-  const active = document.activeElement;
-  if (options.keepActive && keyboardOpen && active && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName)) {
-    scheduleKeepFieldVisible(active);
-  }
 }
-function scheduleKeepFieldVisible(element, delay = 80) {
+function clearFieldVisibilityTimers() {
   window.clearTimeout(fieldVisibilityTimer);
-  fieldVisibilityTimer = window.setTimeout(() => keepFieldVisible(element), delay);
+  fieldVisibilityTimers.forEach((timer) => window.clearTimeout(timer));
+  fieldVisibilityTimers = [];
 }
-function keepFieldVisible(element) {
+function beginFieldFocusAdjustment(element) {
+  clearFieldVisibilityTimers();
+  focusedField = element;
+  focusedFieldAdjusted = false;
+  scheduleFieldAdjustment(element, 360);
+  fieldVisibilityTimers = [window.setTimeout(() => adjustFocusedField(element), 960)];
+}
+function scheduleFieldAdjustment(element, delay = 180) {
+  if (focusedFieldAdjusted || focusedField !== element || document.activeElement !== element) return;
+  window.clearTimeout(fieldVisibilityTimer);
+  fieldVisibilityTimer = window.setTimeout(() => adjustFocusedField(element), delay);
+}
+function adjustFocusedField(element) {
+  if (focusedFieldAdjusted || focusedField !== element || document.activeElement !== element) return;
+  focusedFieldAdjusted = true;
+  clearFieldVisibilityTimers();
+  updateViewport();
+  keepFieldComfortablyVisible(element);
+}
+function keepFieldComfortablyVisible(element) {
   const viewport = window.visualViewport;
   const visibleTop = viewport ? viewport.offsetTop : 0;
-  const visibleBottom = visibleTop + (viewport ? viewport.height : window.innerHeight);
+  const visibleHeight = viewport ? viewport.height : window.innerHeight;
+  const visibleBottom = visibleTop + visibleHeight;
   const rect = element.getBoundingClientRect();
-  const margin = 18;
-  const topDelta = rect.top - visibleTop - margin;
-  const bottomDelta = rect.bottom - visibleBottom + margin;
+  const topLimit = visibleTop + 16;
+  const bottomLimit = visibleBottom - Math.min(96, Math.max(56, visibleHeight * 0.18));
+  const topDelta = rect.top - topLimit;
+  const bottomDelta = rect.bottom - bottomLimit;
   if (bottomDelta > 0) {
     window.scrollBy({ top: bottomDelta, left: 0, behavior: "auto" });
   } else if (topDelta < 0) {
@@ -850,17 +871,32 @@ function keepFieldVisible(element) {
 }
 updateViewport();
 if (window.visualViewport) {
-  window.visualViewport.addEventListener("resize", () => updateViewport({ keepActive: true }), { passive: true });
-  window.visualViewport.addEventListener("scroll", () => updateViewport(), { passive: true });
+  window.visualViewport.addEventListener("resize", () => {
+    updateViewport();
+    if (focusedField) scheduleFieldAdjustment(focusedField);
+  }, { passive: true });
+  window.visualViewport.addEventListener("scroll", () => {
+    updateViewport();
+    if (focusedField) scheduleFieldAdjustment(focusedField);
+  }, { passive: true });
 }
-window.addEventListener("resize", () => updateViewport({ keepActive: true }), { passive: true });
+window.addEventListener("resize", () => {
+  updateViewport();
+  if (focusedField) scheduleFieldAdjustment(focusedField);
+}, { passive: true });
 document.querySelectorAll("input,select,textarea").forEach((element) => {
   element.addEventListener("focus", () => {
-    window.setTimeout(() => updateViewport({ keepActive: true }), 40);
-    scheduleKeepFieldVisible(element, 180);
+    updateViewport();
+    beginFieldFocusAdjustment(element);
+  });
+  element.addEventListener("input", () => {
+    focusedFieldAdjusted = true;
+    clearFieldVisibilityTimers();
   });
   element.addEventListener("blur", () => {
-    window.clearTimeout(fieldVisibilityTimer);
+    clearFieldVisibilityTimers();
+    focusedField = null;
+    focusedFieldAdjusted = false;
     window.setTimeout(updateViewport, 80);
     window.setTimeout(updateViewport, 260);
     window.setTimeout(updateViewport, 520);
@@ -944,9 +980,9 @@ function htmlPage(title: string, body: string, nonce = cspNonce()): string {
   <title>${escapeHtml(title)}</title>
   <style nonce="${escapeHtml(nonce)}">
     * { box-sizing: border-box; }
-    html { width: 100%; min-height: 100%; overflow-x: hidden; scroll-padding-top: 16px; scroll-padding-bottom: calc(var(--keyboard-inset, 0px) + 96px); background: #f5f7fb; }
-    body { width: 100%; min-height: 100%; overflow-x: hidden; margin: 0; background: #f5f7fb; color: #1f2329; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    .shell { width: min(100%, 720px); min-height: var(--viewport-height, 100svh); margin: 0 auto; padding: 20px max(16px, env(safe-area-inset-left)) calc(40px + env(safe-area-inset-bottom) + var(--keyboard-inset, 0px)) max(16px, env(safe-area-inset-right)); overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+    html { width: 100%; min-height: 100%; overflow-x: hidden; overflow-anchor: none; scroll-padding-top: 16px; scroll-padding-bottom: calc(var(--keyboard-inset, 0px) + 96px); background: #f5f7fb; }
+    body { width: 100%; min-height: 100%; overflow-x: hidden; overflow-anchor: none; margin: 0; background: #f5f7fb; color: #1f2329; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .shell { width: min(100%, 720px); min-height: var(--viewport-height, 100svh); margin: 0 auto; padding: 20px max(16px, env(safe-area-inset-left)) calc(40px + env(safe-area-inset-bottom) + var(--keyboard-inset, 0px)) max(16px, env(safe-area-inset-right)); overflow-anchor: none; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
     .page-header { margin-bottom: 18px; }
     h1 { margin: 0 0 6px; font-size: 22px; line-height: 1.3; }
     h2 { margin: 0 0 10px; font-size: 16px; }
